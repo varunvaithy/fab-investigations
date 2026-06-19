@@ -1,0 +1,157 @@
+// =====================================================
+// NO-MAU 12-MONTH TENANT EXTRACTION QUERIES
+// =====================================================
+// Cluster: https://odspfabkusto.eastus.kusto.windows.net
+// Database: fabpartnerdb
+// Date: June 17, 2026
+//
+// Total count confirmed: 59,718,960 provisioned tenants with DateLastSeen > 12 months ago
+// =====================================================
+
+// -------------------------------------------------------
+// QUERY 1: Summary — Count + Segment Breakdown
+// -------------------------------------------------------
+DIM_TENANTS
+| where StorageLimit > 0
+| where DateLastSeen < ago(365d)
+| extend Segment = case(
+    HasPaid == true, 'Paid',
+    HasEducation == true or IsEduSegment == true, 'EDU',
+    HasCharity == true, 'Charity',
+    'Free/Other'
+)
+| summarize 
+    TenantCount = count(),
+    StorageAllocatedTB = round(sum(todouble(StorageLimit)) / (1024.0*1024.0), 1)
+    by Segment
+| order by TenantCount desc
+
+
+// -------------------------------------------------------
+// QUERY 2: No-MAU tenants that ACTUALLY HAVE DATA stored
+// (joins with DimTenant_SiteMetrics for actual consumption)
+// -------------------------------------------------------
+let tenantsWithData = 
+    DimTenant_SiteMetrics
+    | where Date == datetime(2026-06-15)
+    | summarize TotalStorageBytes = sum(TotalStorageConsumed) by SiteSubscriptionId
+    | where TotalStorageBytes > 0;
+DIM_TENANTS
+| where DateLastSeen < ago(365d)
+| join kind=inner tenantsWithData on SiteSubscriptionId
+| extend Segment = case(
+    HasPaid == true, 'Paid',
+    HasEducation == true or IsEduSegment == true, 'EDU',
+    HasCharity == true, 'Charity',
+    'Free/Other'
+)
+| summarize 
+    TenantCount = count(),
+    TotalStorageTB = round(sum(todouble(TotalStorageBytes)) / (1024.0*1024.0*1024.0*1024.0), 1),
+    AvgStorageGB = round(avg(todouble(TotalStorageBytes)) / (1024.0*1024.0*1024.0), 2)
+    by Segment
+| order by TotalStorageTB desc
+
+
+// -------------------------------------------------------
+// QUERY 3: Top countries for PAID no-MAU tenants with data
+// -------------------------------------------------------
+let tenantsWithData = 
+    DimTenant_SiteMetrics
+    | where Date == datetime(2026-06-15)
+    | summarize TotalStorageBytes = sum(TotalStorageConsumed) by SiteSubscriptionId
+    | where TotalStorageBytes > 0;
+DIM_TENANTS
+| where DateLastSeen < ago(365d)
+| where HasPaid == true
+| join kind=inner tenantsWithData on SiteSubscriptionId
+| summarize 
+    TenantCount = count(),
+    TotalStorageTB = round(sum(todouble(TotalStorageBytes)) / (1024.0*1024.0*1024.0*1024.0), 1)
+    by MSSalesCountryCode
+| order by TotalStorageTB desc
+| take 20
+
+
+// -------------------------------------------------------
+// QUERY 4: EXPORT — Full tenant ID list (PAID, >1GB stored, no MAU 12mo)
+// This is the HIGH-VALUE actionable list
+// -------------------------------------------------------
+let tenantsWithData = 
+    DimTenant_SiteMetrics
+    | where Date == datetime(2026-06-15)
+    | summarize TotalStorageBytes = sum(TotalStorageConsumed) by SiteSubscriptionId
+    | where TotalStorageBytes > 1073741824;  // > 1 GB
+DIM_TENANTS
+| where DateLastSeen < ago(365d)
+| where HasPaid == true
+| join kind=inner tenantsWithData on SiteSubscriptionId
+| project 
+    SiteSubscriptionId,
+    OMSTenantId,
+    OrganizationName,
+    MSSalesCountryCode,
+    CustomerSegmentGroup,
+    DateLastSeen,
+    LicensesEnabled,
+    StorageConsumedGB = round(todouble(TotalStorageBytes) / (1024.0*1024.0*1024.0), 2),
+    StorageLimitMB = StorageLimit
+| order by StorageConsumedGB desc
+
+
+// -------------------------------------------------------
+// QUERY 5: EXPORT — Full tenant ID list (ALL segments, >100MB stored, no MAU 12mo)
+// Broader list for bulk analysis
+// -------------------------------------------------------
+let tenantsWithData = 
+    DimTenant_SiteMetrics
+    | where Date == datetime(2026-06-15)
+    | summarize TotalStorageBytes = sum(TotalStorageConsumed) by SiteSubscriptionId
+    | where TotalStorageBytes > 104857600;  // > 100 MB
+DIM_TENANTS
+| where DateLastSeen < ago(365d)
+| join kind=inner tenantsWithData on SiteSubscriptionId
+| project 
+    SiteSubscriptionId,
+    OMSTenantId,
+    OrganizationName,
+    MSSalesCountryCode,
+    CustomerSegmentGroup,
+    HasPaid,
+    HasEducation,
+    IsEduSegment,
+    IsFraud,
+    FraudState,
+    DateLastSeen,
+    LicensesEnabled,
+    TopSkuGroup,
+    StorageConsumedGB = round(todouble(TotalStorageBytes) / (1024.0*1024.0*1024.0), 2),
+    StorageLimitMB = StorageLimit
+| order by StorageConsumedGB desc
+
+
+// -------------------------------------------------------
+// QUERY 6: Storage bucket breakdown for no-MAU tenants
+// -------------------------------------------------------
+let tenantsWithData = 
+    DimTenant_SiteMetrics
+    | where Date == datetime(2026-06-15)
+    | summarize TotalStorageBytes = sum(TotalStorageConsumed) by SiteSubscriptionId
+    | where TotalStorageBytes > 0;
+DIM_TENANTS
+| where DateLastSeen < ago(365d)
+| join kind=inner tenantsWithData on SiteSubscriptionId
+| extend StorageGB = todouble(TotalStorageBytes) / (1024.0*1024.0*1024.0)
+| extend StorageBucket = case(
+    StorageGB >= 1000, '1TB+',
+    StorageGB >= 100, '100GB-1TB',
+    StorageGB >= 10, '10GB-100GB',
+    StorageGB >= 1, '1GB-10GB',
+    StorageGB >= 0.1, '100MB-1GB',
+    '<100MB'
+)
+| summarize 
+    TenantCount = count(),
+    TotalStorageTB = round(sum(StorageGB) / 1024.0, 1)
+    by StorageBucket
+| order by TotalStorageTB desc

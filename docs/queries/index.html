@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Query Library — FAB Portal</title>
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/manifest.js"></script>
+<!-- marked.js for rendering query docs -->
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
+<style>
+  .page-header { padding: 32px 0 0; }
+  .page-header h1 {
+    font-size: 28px; font-weight: 800; letter-spacing: -1px;
+    background: linear-gradient(135deg, #e2e8f0, #f59e0b);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  }
+  .page-header p { color: var(--text-muted); font-size: 14px; margin-top: 4px; }
+
+  .query-grid {
+    display: grid;
+    grid-template-columns: 280px 1fr;
+    gap: 24px;
+    margin-top: 24px;
+  }
+
+  .query-list {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+  .ql-header { padding: 16px 20px; border-bottom: 1px solid var(--border); font-size: 12px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
+
+  .ql-item {
+    padding: 12px 20px;
+    cursor: pointer;
+    border-bottom: 1px solid rgba(255,255,255,0.03);
+    transition: all var(--transition);
+    border-left: 3px solid transparent;
+  }
+  .ql-item:hover { background: rgba(255,255,255,0.02); }
+  .ql-item.active { background: var(--accent-glow); border-left-color: var(--accent); }
+  .ql-item h4 { font-size: 13px; font-weight: 500; margin-bottom: 2px; }
+  .ql-item .ql-lang {
+    font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;
+    padding: 1px 6px; border-radius: 3px; display: inline-block;
+  }
+  .lang-kql { background: rgba(6,182,212,0.15); color: #06b6d4; }
+  .lang-sql { background: rgba(168,85,247,0.15); color: #a855f7; }
+
+  .query-content {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    min-height: 400px;
+  }
+
+  .qc-header {
+    padding: 20px 24px;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .qc-header h2 { font-size: 17px; font-weight: 600; }
+  .qc-actions { display: flex; gap: 8px; }
+  .qc-btn {
+    background: rgba(255,255,255,0.05); border: 1px solid var(--border); color: var(--text-muted);
+    padding: 6px 14px; border-radius: var(--radius-xs); font-size: 12px; cursor: pointer;
+    font-family: var(--font); transition: all var(--transition);
+  }
+  .qc-btn:hover { background: rgba(255,255,255,0.1); color: var(--text); }
+  .qc-btn.primary { background: var(--accent-glow); border-color: var(--accent); color: var(--accent-text); }
+  .qc-btn.primary:hover { background: var(--accent); color: white; }
+
+  .qc-body { padding: 24px; }
+  .qc-body .md-content { max-width: none; }
+
+  .qc-empty {
+    display: flex; align-items: center; justify-content: center;
+    height: 300px; color: var(--text-dim); font-size: 14px;
+  }
+
+  /* Query code specific styling */
+  .qc-body pre {
+    background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--radius-sm);
+    padding: 16px; overflow-x: auto; font-family: var(--font-mono); font-size: 13px;
+    line-height: 1.6; color: var(--text); margin: 12px 0; position: relative;
+  }
+  .qc-body pre .copy-btn {
+    position: absolute; top: 8px; right: 8px;
+    background: rgba(255,255,255,0.08); border: 1px solid var(--border); color: var(--text-muted);
+    padding: 4px 10px; border-radius: var(--radius-xs); font-size: 11px; cursor: pointer;
+    font-family: var(--font); transition: all var(--transition); opacity: 0;
+  }
+  .qc-body pre:hover .copy-btn { opacity: 1; }
+  .qc-body pre .copy-btn:hover { background: rgba(255,255,255,0.15); color: var(--text); }
+
+  /* KQL keyword highlighting (basic) */
+  .kql-keyword { color: #c792ea; font-weight: 600; }
+  .kql-function { color: #82aaff; }
+  .kql-string { color: #c3e88d; }
+  .kql-comment { color: #546e7a; font-style: italic; }
+  .kql-number { color: #f78c6c; }
+
+  @media (max-width: 800px) {
+    .query-grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="topnav-brand"><div class="logo">F</div>FAB Portal</div>
+  <div class="topnav-links">
+    <a href="../portal.html">Home</a>
+    <a href="../investigations/index.html">Investigations</a>
+    <a href="../data-explorer/index.html">Data Explorer</a>
+    <a href="index.html" class="active">Query Library</a>
+    <a href="../biweekly-report/dashboard/index.html">Dashboard</a>
+  </div>
+</nav>
+
+<div class="container-wide">
+  <div class="page-header">
+    <h1>Query Library</h1>
+    <p>Production KQL and SQL queries for detection, analysis, and investigation. Click to view, copy any query.</p>
+  </div>
+
+  <div class="query-grid">
+    <div class="query-list">
+      <div class="ql-header">Queries (${QUERY_FILES.length})</div>
+      <div id="queryItems"></div>
+    </div>
+
+    <div class="query-content" id="queryContent">
+      <div class="qc-empty">Select a query from the sidebar</div>
+    </div>
+  </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  const itemsEl = document.getElementById('queryItems');
+  const contentEl = document.getElementById('queryContent');
+
+  // Render sidebar
+  itemsEl.innerHTML = QUERY_FILES.map((qf, i) => `
+    <div class="ql-item" data-idx="${i}">
+      <h4>${qf.name}</h4>
+      <span class="ql-lang lang-${qf.lang}">${qf.lang}</span>
+    </div>
+  `).join('');
+
+  // Update count in header
+  document.querySelector('.ql-header').textContent = `Queries (${QUERY_FILES.length})`;
+
+  itemsEl.addEventListener('click', e => {
+    const item = e.target.closest('.ql-item');
+    if (!item) return;
+    itemsEl.querySelectorAll('.ql-item').forEach(i => i.classList.remove('active'));
+    item.classList.add('active');
+    loadQuery(QUERY_FILES[parseInt(item.dataset.idx)]);
+  });
+
+  async function loadQuery(qf) {
+    contentEl.innerHTML = '<div class="qc-empty">Loading...</div>';
+
+    try {
+      const resp = await fetch('../' + qf.file);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const text = await resp.text();
+
+      const isMarkdown = qf.file.endsWith('.md');
+
+      if (isMarkdown) {
+        // Render markdown (which contains embedded queries)
+        const html = marked.parse(text);
+        contentEl.innerHTML = `
+          <div class="qc-header">
+            <h2>${qf.name}</h2>
+            <div class="qc-actions">
+              <button class="qc-btn" onclick="copyAllQueries()">Copy All Queries</button>
+            </div>
+          </div>
+          <div class="qc-body"><div class="md-content">${html}</div></div>
+        `;
+      } else {
+        // Raw query file
+        contentEl.innerHTML = `
+          <div class="qc-header">
+            <h2>${qf.name}</h2>
+            <div class="qc-actions">
+              <button class="qc-btn primary" onclick="copyContent()">Copy Query</button>
+            </div>
+          </div>
+          <div class="qc-body">
+            <pre><code>${escapeHtml(text)}</code></pre>
+          </div>
+        `;
+      }
+
+      // Add copy buttons to all code blocks
+      contentEl.querySelectorAll('pre').forEach(pre => {
+        const btn = document.createElement('button');
+        btn.className = 'copy-btn';
+        btn.textContent = 'Copy';
+        btn.onclick = () => {
+          const code = pre.querySelector('code');
+          navigator.clipboard.writeText(code ? code.textContent : pre.textContent);
+          btn.textContent = 'Copied!';
+          setTimeout(() => btn.textContent = 'Copy', 2000);
+        };
+        pre.appendChild(btn);
+      });
+
+    } catch (err) {
+      contentEl.innerHTML = `<div class="qc-empty" style="color:var(--red)">
+        Failed to load: ${qf.file}<br>
+        <span style="font-size:12px;color:var(--text-dim)">Start a local HTTP server to load files.</span>
+      </div>`;
+    }
+  }
+
+  window.copyContent = function() {
+    const code = contentEl.querySelector('pre code');
+    if (code) {
+      navigator.clipboard.writeText(code.textContent);
+      const btn = contentEl.querySelector('.qc-btn.primary');
+      if (btn) { btn.textContent = 'Copied!'; setTimeout(() => btn.textContent = 'Copy Query', 2000); }
+    }
+  };
+
+  window.copyAllQueries = function() {
+    const blocks = contentEl.querySelectorAll('pre code');
+    const all = Array.from(blocks).map(b => b.textContent).join('\n\n// ─────────────────────────────────\n\n');
+    navigator.clipboard.writeText(all);
+    const btn = contentEl.querySelector('.qc-btn');
+    if (btn) { btn.textContent = 'Copied All!'; setTimeout(() => btn.textContent = 'Copy All Queries', 2000); }
+  };
+
+  function escapeHtml(str) {
+    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  // Auto-load from URL param
+  const params = new URLSearchParams(window.location.search);
+  const idx = parseInt(params.get('idx'));
+  if (!isNaN(idx) && idx < QUERY_FILES.length) {
+    itemsEl.querySelectorAll('.ql-item')[idx]?.classList.add('active');
+    loadQuery(QUERY_FILES[idx]);
+  }
+});
+</script>
+</body>
+</html>

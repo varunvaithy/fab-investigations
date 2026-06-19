@@ -1,0 +1,547 @@
+// ============================================================================
+// SKU / LICENSE LEVEL FRAUD ANALYSIS — Enterprise Tenants
+// Target: OdspFabKusto → D2K (TENANT_INFO table)
+// MCP: mcp_fabtenanttool_query_d2_k_advanced / query_from_d2_k_basic
+// Date: 2026-05-27
+// ============================================================================
+//
+// OBJECTIVE: Identify which paid SKUs have disproportionate fraud/abuse signals
+// APPROACH:
+//   1. Map all TENANT_LEVEL values to approximate price tiers
+//   2. Distribution of tenants per SKU (universe)
+//   3. Abuse-signal concentration per SKU (storage/user anomalies)
+//   4. SKUs where "never paid" tenants have excessive storage
+//   5. Cross-reference with behavioral signals (onmicrosoft-only, low MAU, etc.)
+//
+// PRICE TIER REFERENCE (approximate per-user/month USD):
+//   FREE/TRIAL        = $0
+//   E5 DEVELOPER      = $0 (dev program, 25 licenses free)
+//   OFFICE 365 A1     = $0 (EDU free tier)
+//   OFFICE 365 A1+    = $2/user (EDU)
+//   F1 / F3           = $2-8/user (Frontline)
+//   SPO PLAN 1        = $5/user
+//   M365 BUSINESS BASIC    = $6/user
+//   OFFICE 365 E1     = $8/user
+//   SPO PLAN 2        = $10/user
+//   M365 BUSINESS STANDARD = $12.50/user
+//   M365 BUSINESS PREMIUM  = $22/user
+//   OFFICE 365 E3     = $23/user
+//   M365 E3           = $36/user
+//   OFFICE 365 E5     = $38/user
+//   M365 E5           = $57/user
+// ============================================================================
+
+
+// ============================================================================
+// STEP 1: FULL SKU DISTRIBUTION — Universe of enterprise tenants by TENANT_LEVEL
+// This gives you the "lay of the land" before filtering for abuse signals
+// ============================================================================
+
+TENANT_INFO
+| where TENANT_CATEGORY != "Consumer"
+| where isnotempty(TENANT_LEVEL)
+| summarize 
+    TenantCount = count(),
+    PaidTenants = countif(toupper(coalesce(HAS_EVER_PAID, "FALSE")) == "TRUE"),
+    NeverPaidTenants = countif(toupper(coalesce(HAS_EVER_PAID, "FALSE")) == "FALSE"),
+    TotalStorageTB = round(sum(TENANT_TOTAL_DISK_USED_GB) / 1024.0, 1),
+    AvgStorageGB = round(avg(TENANT_TOTAL_DISK_USED_GB), 1),
+    MedianLicenses = percentile(tolong(LICENSES_ENABLED), 50),
+    AvgActivatedUsers = round(avg(TOTAL_ACTIVATED_USERS), 0),
+    PctNeverPaid = round(100.0 * countif(toupper(coalesce(HAS_EVER_PAID, "FALSE")) == "FALSE") / count(), 1)
+  by TENANT_LEVEL
+| extend PriceTier = case(
+    TENANT_LEVEL has "FREE" or TENANT_LEVEL has "TRIAL", 0,
+    TENANT_LEVEL == "E5 DEVELOPER", 0,
+    TENANT_LEVEL has "A1" and not(TENANT_LEVEL has "A1 PLUS" or TENANT_LEVEL has "A1+"), 0,
+    TENANT_LEVEL has "F1" or TENANT_LEVEL has "F3", 4,
+    TENANT_LEVEL has "SPO PLAN 1" or TENANT_LEVEL has "SHAREPOINT PLAN 1", 5,
+    TENANT_LEVEL has "BUSINESS BASIC", 6,
+    TENANT_LEVEL has "A1 PLUS" or TENANT_LEVEL has "A1+" or TENANT_LEVEL has "A3", 7,
+    TENANT_LEVEL has "E1" or TENANT_LEVEL has "OFFICE 365 E1", 8,
+    TENANT_LEVEL has "SPO PLAN 2" or TENANT_LEVEL has "SHAREPOINT PLAN 2", 10,
+    TENANT_LEVEL has "BUSINESS STANDARD", 13,
+    TENANT_LEVEL has "BUSINESS PREMIUM", 22,
+    TENANT_LEVEL has "E3" and TENANT_LEVEL has "OFFICE", 23,
+    TENANT_LEVEL has "A5", 25,
+    TENANT_LEVEL has "M365 E3" or TENANT_LEVEL has "MICROSOFT 365 E3", 36,
+    TENANT_LEVEL has "E5" and TENANT_LEVEL has "OFFICE", 38,
+    TENANT_LEVEL has "M365 E5" or TENANT_LEVEL has "MICROSOFT 365 E5", 57,
+    15  // default: mid-tier for unclassified
+  )
+| order by PriceTier asc, TenantCount desc
+
+
+// ============================================================================
+// STEP 2: ABUSE SURFACE PER SKU — Storage hogs with low activity
+// Key fraud signal: high storage, low MAU, low activated users
+// Focus on PAID SKUs only (enterprise = revenue-earning licenses)
+// ============================================================================
+
+TENANT_INFO
+| where TENANT_CATEGORY != "Consumer"
+| where isnotempty(TENANT_LEVEL)
+| where TENANT_TOTAL_DISK_USED_GB > 1000  // >1 TB storage used
+| where TOTAL_ACTIVATED_USERS < 10        // very few real users
+| where toupper(coalesce(ISS500, "FALSE")) == "FALSE"
+| where toupper(coalesce(ISS2200, "FALSE")) == "FALSE"
+| summarize 
+    AbusiveTenants = count(),
+    TotalStorageTB = round(sum(TENANT_TOTAL_DISK_USED_GB) / 1024.0, 1),
+    AvgStorageGB = round(avg(TENANT_TOTAL_DISK_USED_GB), 0),
+    MaxStorageGB = max(TENANT_TOTAL_DISK_USED_GB),
+    PctNeverPaid = round(100.0 * countif(toupper(coalesce(HAS_EVER_PAID, "FALSE")) == "FALSE") / count(), 1),
+    PctOnmicrosoftOnly = round(100.0 * countif(HAS_ONLY_ONMICROSOFT_DOMAIN == 1) / count(), 1),
+    AvgLicenses = round(avg(tolong(LICENSES_ENABLED)), 0)
+  by TENANT_LEVEL
+| extend PriceTier = case(
+    TENANT_LEVEL has "FREE" or TENANT_LEVEL has "TRIAL", 0,
+    TENANT_LEVEL == "E5 DEVELOPER", 0,
+    TENANT_LEVEL has "A1" and not(TENANT_LEVEL has "A1 PLUS" or TENANT_LEVEL has "A1+"), 0,
+    TENANT_LEVEL has "F1" or TENANT_LEVEL has "F3", 4,
+    TENANT_LEVEL has "SPO PLAN 1" or TENANT_LEVEL has "SHAREPOINT PLAN 1", 5,
+    TENANT_LEVEL has "BUSINESS BASIC", 6,
+    TENANT_LEVEL has "A1 PLUS" or TENANT_LEVEL has "A1+" or TENANT_LEVEL has "A3", 7,
+    TENANT_LEVEL has "E1" or TENANT_LEVEL has "OFFICE 365 E1", 8,
+    TENANT_LEVEL has "SPO PLAN 2" or TENANT_LEVEL has "SHAREPOINT PLAN 2", 10,
+    TENANT_LEVEL has "BUSINESS STANDARD", 13,
+    TENANT_LEVEL has "BUSINESS PREMIUM", 22,
+    TENANT_LEVEL has "E3" and TENANT_LEVEL has "OFFICE", 23,
+    TENANT_LEVEL has "A5", 25,
+    TENANT_LEVEL has "M365 E3" or TENANT_LEVEL has "MICROSOFT 365 E3", 36,
+    TENANT_LEVEL has "E5" and TENANT_LEVEL has "OFFICE", 38,
+    TENANT_LEVEL has "M365 E5" or TENANT_LEVEL has "MICROSOFT 365 E5", 57,
+    15
+  )
+| order by PriceTier asc, AbusiveTenants desc
+
+
+// ============================================================================
+// STEP 3: FRAUD CONCENTRATION RATIO — Abuse tenants vs total tenants per SKU
+// This is the KEY metric: what % of each SKU's population looks abusive?
+// Higher ratio = more fraud concentrated on that SKU
+// ============================================================================
+
+let AbuseSurface = 
+TENANT_INFO
+| where TENANT_CATEGORY != "Consumer"
+| where isnotempty(TENANT_LEVEL)
+| where TENANT_TOTAL_DISK_USED_GB > 1000
+| where TOTAL_ACTIVATED_USERS < 10
+| where toupper(coalesce(ISS500, "FALSE")) == "FALSE"
+| where toupper(coalesce(ISS2200, "FALSE")) == "FALSE"
+| summarize AbuseTenants = count(), AbuseStorageTB = round(sum(TENANT_TOTAL_DISK_USED_GB)/1024.0, 1) by TENANT_LEVEL;
+let TotalUniverse =
+TENANT_INFO
+| where TENANT_CATEGORY != "Consumer"
+| where isnotempty(TENANT_LEVEL)
+| summarize TotalTenants = count(), TotalStorageTB = round(sum(TENANT_TOTAL_DISK_USED_GB)/1024.0, 1) by TENANT_LEVEL;
+TotalUniverse
+| join kind=leftouter AbuseSurface on TENANT_LEVEL
+| extend 
+    AbuseTenants = coalesce(AbuseTenants, 0),
+    AbuseStorageTB = coalesce(AbuseStorageTB, 0.0),
+    FraudConcentrationPct = round(100.0 * coalesce(AbuseTenants, 0) / TotalTenants, 2),
+    StorageAbuseSharePct = round(100.0 * coalesce(AbuseStorageTB, 0.0) / TotalStorageTB, 2)
+| project TENANT_LEVEL, TotalTenants, AbuseTenants, FraudConcentrationPct, 
+          TotalStorageTB, AbuseStorageTB, StorageAbuseSharePct
+| order by FraudConcentrationPct desc
+
+
+// ============================================================================
+// STEP 4: CHEAPEST PAID SKUs WITH DISPROPORTIONATE STORAGE
+// The "sweet spot" for fraud: cheapest paid license that gives max storage
+// Focus: HAS_EVER_PAID=TRUE but storage >> expected for that tier
+// ============================================================================
+
+TENANT_INFO
+| where TENANT_CATEGORY != "Consumer"
+| where isnotempty(TENANT_LEVEL)
+| where toupper(coalesce(HAS_EVER_PAID, "TRUE")) == "TRUE"
+| where TENANT_TOTAL_DISK_USED_GB > 5000  // >5 TB = way more than a cheap SKU should use
+| where toupper(coalesce(ISS500, "FALSE")) == "FALSE"
+| where toupper(coalesce(ISS2200, "FALSE")) == "FALSE"
+| extend StoragePerLicense_GB = iff(tolong(LICENSES_ENABLED) > 0, 
+    round(1.0 * TENANT_TOTAL_DISK_USED_GB / tolong(LICENSES_ENABLED), 0), 
+    toreal(TENANT_TOTAL_DISK_USED_GB))
+| where StoragePerLicense_GB > 500  // >500 GB per license = highly anomalous
+| summarize 
+    TenantCount = count(),
+    TotalStorageTB = round(sum(TENANT_TOTAL_DISK_USED_GB) / 1024.0, 1),
+    AvgStoragePerLicense_GB = round(avg(StoragePerLicense_GB), 0),
+    MaxStoragePerLicense_GB = max(StoragePerLicense_GB),
+    AvgLicenses = round(avg(tolong(LICENSES_ENABLED)), 0),
+    PctLowMAU = round(100.0 * countif(TOTAL_ACTIVATED_USERS < 5) / count(), 1),
+    TopCountries = make_set(COUNTRY_CODE, 10)
+  by TENANT_LEVEL
+| extend PriceTier = case(
+    TENANT_LEVEL has "FREE" or TENANT_LEVEL has "TRIAL", 0,
+    TENANT_LEVEL == "E5 DEVELOPER", 0,
+    TENANT_LEVEL has "A1" and not(TENANT_LEVEL has "A1 PLUS" or TENANT_LEVEL has "A1+"), 0,
+    TENANT_LEVEL has "F1" or TENANT_LEVEL has "F3", 4,
+    TENANT_LEVEL has "SPO PLAN 1" or TENANT_LEVEL has "SHAREPOINT PLAN 1", 5,
+    TENANT_LEVEL has "BUSINESS BASIC", 6,
+    TENANT_LEVEL has "A1 PLUS" or TENANT_LEVEL has "A1+" or TENANT_LEVEL has "A3", 7,
+    TENANT_LEVEL has "E1" or TENANT_LEVEL has "OFFICE 365 E1", 8,
+    TENANT_LEVEL has "SPO PLAN 2" or TENANT_LEVEL has "SHAREPOINT PLAN 2", 10,
+    TENANT_LEVEL has "BUSINESS STANDARD", 13,
+    TENANT_LEVEL has "BUSINESS PREMIUM", 22,
+    TENANT_LEVEL has "E3" and TENANT_LEVEL has "OFFICE", 23,
+    TENANT_LEVEL has "A5", 25,
+    TENANT_LEVEL has "M365 E3" or TENANT_LEVEL has "MICROSOFT 365 E3", 36,
+    TENANT_LEVEL has "E5" and TENANT_LEVEL has "OFFICE", 38,
+    TENANT_LEVEL has "M365 E5" or TENANT_LEVEL has "MICROSOFT 365 E5", 57,
+    15
+  )
+| order by PriceTier asc, TenantCount desc
+
+
+// ============================================================================
+// STEP 5: "NEVER PAID" TENANTS ON PAID SKU NAMES — License fraud signal
+// Tenants with a paid-sounding TENANT_LEVEL but HAS_EVER_PAID=FALSE
+// This can indicate: trial abuse, VL fraud, stolen licenses, or provisioning bugs
+// ============================================================================
+
+TENANT_INFO
+| where TENANT_CATEGORY != "Consumer"
+| where isnotempty(TENANT_LEVEL)
+| where toupper(coalesce(HAS_EVER_PAID, "FALSE")) == "FALSE"
+| where TENANT_LEVEL !has "FREE" 
+    and TENANT_LEVEL !has "TRIAL"
+    and TENANT_LEVEL != "E5 DEVELOPER"
+| where TENANT_TOTAL_DISK_USED_GB > 100   // non-trivial storage usage
+| where toupper(coalesce(ISS500, "FALSE")) == "FALSE"
+| where toupper(coalesce(ISS2200, "FALSE")) == "FALSE"
+| summarize 
+    TenantCount = count(),
+    TotalStorageTB = round(sum(TENANT_TOTAL_DISK_USED_GB) / 1024.0, 1),
+    AvgStorageGB = round(avg(TENANT_TOTAL_DISK_USED_GB), 0),
+    PctOnmicrosoftOnly = round(100.0 * countif(HAS_ONLY_ONMICROSOFT_DOMAIN == 1) / count(), 1),
+    PctZeroMAU = round(100.0 * countif(TOTAL_ACTIVATED_USERS == 0) / count(), 1),
+    AvgLicenses = round(avg(tolong(LICENSES_ENABLED)), 0),
+    TopCountries = make_set(COUNTRY_CODE, 10)
+  by TENANT_LEVEL
+| order by TotalStorageTB desc
+
+
+// ============================================================================
+// STEP 6: TOP INDIVIDUAL ABUSIVE TENANTS PER CHEAP SKU — Drill-down
+// Find the worst offenders on the cheapest paid tiers
+// Adjust the TENANT_LEVEL filter based on results from Steps 1-5
+// ============================================================================
+
+// 6A: M365 Business Basic (cheapest mainstream paid tier: $6/user/month)
+TENANT_INFO
+| where TENANT_CATEGORY != "Consumer"
+| where TENANT_LEVEL has "BUSINESS BASIC"
+| where TENANT_TOTAL_DISK_USED_GB > 5000
+| where toupper(coalesce(ISS500, "FALSE")) == "FALSE"
+| where toupper(coalesce(ISS2200, "FALSE")) == "FALSE"
+| project 
+    SITE_SUBSCRIPTION_ID,
+    OMS_TENANT_ID,
+    TENANT_NAME,
+    TENANT_LEVEL,
+    COUNTRY_CODE,
+    TENANT_TOTAL_DISK_USED_GB,
+    StorageTB = round(TENANT_TOTAL_DISK_USED_GB / 1024.0, 1),
+    LICENSES_ENABLED,
+    TOTAL_ACTIVATED_USERS,
+    SESSION_COUNT,
+    HAS_EVER_PAID,
+    HAS_ONLY_ONMICROSOFT_DOMAIN,
+    TENANT_CREATED_DATE,
+    DOMAIN_COUNT
+| order by TENANT_TOTAL_DISK_USED_GB desc
+| take 50
+
+// 6B: F1/F3 (Frontline, cheapest: $2-8/user/month, minimal storage allocation)
+TENANT_INFO
+| where TENANT_CATEGORY != "Consumer"
+| where TENANT_LEVEL has "F1" or TENANT_LEVEL has "F3"
+| where TENANT_TOTAL_DISK_USED_GB > 5000
+| where toupper(coalesce(ISS500, "FALSE")) == "FALSE"
+| where toupper(coalesce(ISS2200, "FALSE")) == "FALSE"
+| project 
+    SITE_SUBSCRIPTION_ID,
+    OMS_TENANT_ID,
+    TENANT_NAME,
+    TENANT_LEVEL,
+    COUNTRY_CODE,
+    TENANT_TOTAL_DISK_USED_GB,
+    StorageTB = round(TENANT_TOTAL_DISK_USED_GB / 1024.0, 1),
+    LICENSES_ENABLED,
+    TOTAL_ACTIVATED_USERS,
+    SESSION_COUNT,
+    HAS_EVER_PAID,
+    HAS_ONLY_ONMICROSOFT_DOMAIN,
+    TENANT_CREATED_DATE,
+    DOMAIN_COUNT
+| order by TENANT_TOTAL_DISK_USED_GB desc
+| take 50
+
+// 6C: SPO Plan 1 ($5/user/month, 1TB/user base)
+TENANT_INFO
+| where TENANT_CATEGORY != "Consumer"
+| where TENANT_LEVEL has "SPO PLAN 1" or TENANT_LEVEL has "SHAREPOINT PLAN 1"
+| where TENANT_TOTAL_DISK_USED_GB > 5000
+| where toupper(coalesce(ISS500, "FALSE")) == "FALSE"
+| where toupper(coalesce(ISS2200, "FALSE")) == "FALSE"
+| project 
+    SITE_SUBSCRIPTION_ID,
+    OMS_TENANT_ID,
+    TENANT_NAME,
+    TENANT_LEVEL,
+    COUNTRY_CODE,
+    TENANT_TOTAL_DISK_USED_GB,
+    StorageTB = round(TENANT_TOTAL_DISK_USED_GB / 1024.0, 1),
+    LICENSES_ENABLED,
+    TOTAL_ACTIVATED_USERS,
+    SESSION_COUNT,
+    HAS_EVER_PAID,
+    HAS_ONLY_ONMICROSOFT_DOMAIN,
+    TENANT_CREATED_DATE,
+    DOMAIN_COUNT
+| order by TENANT_TOTAL_DISK_USED_GB desc
+| take 50
+
+
+// ============================================================================
+// STEP 7: LICENSE COUNT ANOMALY — Tenants with suspiciously high license counts
+// Some fraud rings acquire millions of licenses via VL exploits
+// ============================================================================
+
+TENANT_INFO
+| where TENANT_CATEGORY != "Consumer"
+| where isnotempty(TENANT_LEVEL)
+| where tolong(LICENSES_ENABLED) > 10000   // >10K licenses
+| where TOTAL_ACTIVATED_USERS < 100        // but almost no real users
+| where toupper(coalesce(ISS500, "FALSE")) == "FALSE"
+| where toupper(coalesce(ISS2200, "FALSE")) == "FALSE"
+| extend LicenseUtilizationPct = round(100.0 * TOTAL_ACTIVATED_USERS / tolong(LICENSES_ENABLED), 2)
+| summarize 
+    TenantCount = count(),
+    TotalLicenses = sum(tolong(LICENSES_ENABLED)),
+    AvgLicenses = round(avg(tolong(LICENSES_ENABLED)), 0),
+    MaxLicenses = max(tolong(LICENSES_ENABLED)),
+    TotalStorageTB = round(sum(TENANT_TOTAL_DISK_USED_GB) / 1024.0, 1),
+    AvgUtilizationPct = round(avg(LicenseUtilizationPct), 2)
+  by TENANT_LEVEL
+| order by TotalLicenses desc
+
+
+// ============================================================================
+// STEP 8: STORAGE-TO-LICENSE RATIO DISTRIBUTION — By SKU
+// Expected ratio: ~1TB/license for most plans, ~2TB pooled for E3/E5
+// Ratio >> 10 TB/license = definite abuse unless very few licenses
+// ============================================================================
+
+TENANT_INFO
+| where TENANT_CATEGORY != "Consumer"
+| where isnotempty(TENANT_LEVEL)
+| where tolong(LICENSES_ENABLED) > 0
+| where TENANT_TOTAL_DISK_USED_GB > 100
+| where toupper(coalesce(ISS500, "FALSE")) == "FALSE"
+| where toupper(coalesce(ISS2200, "FALSE")) == "FALSE"
+| extend StoragePerLicense_GB = round(1.0 * TENANT_TOTAL_DISK_USED_GB / tolong(LICENSES_ENABLED), 1)
+| summarize 
+    TenantCount = count(),
+    P50_StoragePerLicense = percentile(StoragePerLicense_GB, 50),
+    P90_StoragePerLicense = percentile(StoragePerLicense_GB, 90),
+    P99_StoragePerLicense = percentile(StoragePerLicense_GB, 99),
+    Max_StoragePerLicense = max(StoragePerLicense_GB),
+    TenantsOver10GB_per_license = countif(StoragePerLicense_GB > 10),
+    TenantsOver100GB_per_license = countif(StoragePerLicense_GB > 100),
+    TenantsOver1000GB_per_license = countif(StoragePerLicense_GB > 1000)
+  by TENANT_LEVEL
+| where TenantCount > 10  // Only SKUs with meaningful population
+| order by P99_StoragePerLicense desc
+
+
+// ============================================================================
+// STEP 9: CREATION DATE PATTERNS — Fraud rings register in bursts
+// Look for SKUs with suspicious creation clustering
+// ============================================================================
+
+TENANT_INFO
+| where TENANT_CATEGORY != "Consumer"
+| where isnotempty(TENANT_LEVEL)
+| where TENANT_TOTAL_DISK_USED_GB > 1000
+| where TOTAL_ACTIVATED_USERS < 5
+| where toupper(coalesce(ISS500, "FALSE")) == "FALSE"
+| where toupper(coalesce(ISS2200, "FALSE")) == "FALSE"
+| where TENANT_CREATED_DATE >= ago(365d)
+| summarize 
+    NewAbusiveTenants = count(),
+    NewStorageTB = round(sum(TENANT_TOTAL_DISK_USED_GB) / 1024.0, 1),
+    AvgStorageGB = round(avg(TENANT_TOTAL_DISK_USED_GB), 0),
+    CreationBurstDays = dcount(bin(TENANT_CREATED_DATE, 1d)),
+    PeakDayCount = max(count_distinct_approx = 0) // placeholder — see 9B
+  by TENANT_LEVEL, bin(TENANT_CREATED_DATE, 30d) as CreationMonth
+| order by NewAbusiveTenants desc
+
+// 9B: Time-series of abusive tenant creation (for charting)
+TENANT_INFO
+| where TENANT_CATEGORY != "Consumer"
+| where isnotempty(TENANT_LEVEL)
+| where TENANT_TOTAL_DISK_USED_GB > 1000
+| where TOTAL_ACTIVATED_USERS < 5
+| where toupper(coalesce(ISS500, "FALSE")) == "FALSE"
+| where TENANT_CREATED_DATE >= ago(365d)
+| summarize 
+    NewAbusiveTenants = count(),
+    StorageTB = round(sum(TENANT_TOTAL_DISK_USED_GB) / 1024.0, 1)
+  by TENANT_LEVEL, bin(TENANT_CREATED_DATE, 7d) as CreationWeek
+| order by CreationWeek desc, NewAbusiveTenants desc
+
+
+// ============================================================================
+// STEP 10: GEOGRAPHIC HOTSPOTS PER CHEAP SKU — Where is abuse coming from?
+// ============================================================================
+
+TENANT_INFO
+| where TENANT_CATEGORY != "Consumer"
+| where isnotempty(TENANT_LEVEL)
+| where TENANT_TOTAL_DISK_USED_GB > 1000
+| where TOTAL_ACTIVATED_USERS < 10
+| where toupper(coalesce(ISS500, "FALSE")) == "FALSE"
+| where toupper(coalesce(ISS2200, "FALSE")) == "FALSE"
+// Focus on cheaper paid tiers — adjust based on Step 1 results
+| where TENANT_LEVEL has "BUSINESS BASIC" 
+    or TENANT_LEVEL has "F1" or TENANT_LEVEL has "F3"
+    or TENANT_LEVEL has "SPO PLAN 1" or TENANT_LEVEL has "SHAREPOINT PLAN 1"
+    or TENANT_LEVEL has "E1"
+    or TENANT_LEVEL == "E5 DEVELOPER"
+| summarize 
+    TenantCount = count(),
+    TotalStorageTB = round(sum(TENANT_TOTAL_DISK_USED_GB) / 1024.0, 1),
+    AvgStorageGB = round(avg(TENANT_TOTAL_DISK_USED_GB), 0),
+    SKUs = make_set(TENANT_LEVEL, 10)
+  by COUNTRY_CODE
+| order by TotalStorageTB desc
+| take 20
+
+
+// ============================================================================
+// STEP 11: VL (VOLUME LICENSE) ABUSE — Tenants using VL to get free storage
+// VL tenants can get SPO storage without real payment
+// ============================================================================
+
+TENANT_INFO
+| where TENANT_CATEGORY != "Consumer"
+| where isnotempty(TENANT_LEVEL)
+| where toupper(coalesce(HAS_VL, "FALSE")) == "TRUE"
+| where TENANT_TOTAL_DISK_USED_GB > 5000
+| where TOTAL_ACTIVATED_USERS < 10
+| where toupper(coalesce(ISS500, "FALSE")) == "FALSE"
+| where toupper(coalesce(ISS2200, "FALSE")) == "FALSE"
+| summarize 
+    TenantCount = count(),
+    TotalStorageTB = round(sum(TENANT_TOTAL_DISK_USED_GB) / 1024.0, 1),
+    AvgStorageGB = round(avg(TENANT_TOTAL_DISK_USED_GB), 0),
+    MaxStorageGB = max(TENANT_TOTAL_DISK_USED_GB),
+    PctNeverPaid = round(100.0 * countif(toupper(coalesce(HAS_EVER_PAID, "FALSE")) == "FALSE") / count(), 1)
+  by TENANT_LEVEL
+| order by TotalStorageTB desc
+
+
+// ============================================================================
+// STEP 12: COMPOSITE RISK SCORE PER SKU — Multi-signal roll-up
+// Combines: storage anomaly + low MAU + never paid + onmicrosoft-only
+// ============================================================================
+
+TENANT_INFO
+| where TENANT_CATEGORY != "Consumer"
+| where isnotempty(TENANT_LEVEL)
+| where toupper(coalesce(ISS500, "FALSE")) == "FALSE"
+| where toupper(coalesce(ISS2200, "FALSE")) == "FALSE"
+| extend 
+    IsHighStorage = TENANT_TOTAL_DISK_USED_GB > 1000,
+    IsLowMAU = TOTAL_ACTIVATED_USERS < 5,
+    IsNeverPaid = toupper(coalesce(HAS_EVER_PAID, "FALSE")) == "FALSE",
+    IsOnmicrosoftOnly = HAS_ONLY_ONMICROSOFT_DOMAIN == 1,
+    IsHighLicenseRatio = iff(tolong(LICENSES_ENABLED) > 0, 
+        1.0 * TENANT_TOTAL_DISK_USED_GB / tolong(LICENSES_ENABLED) > 100, false)
+| extend RiskSignals = toint(IsHighStorage) + toint(IsLowMAU) + toint(IsNeverPaid) 
+                      + toint(IsOnmicrosoftOnly) + toint(IsHighLicenseRatio)
+| where RiskSignals >= 3  // At least 3 of 5 signals = high risk
+| summarize 
+    HighRiskTenants = count(),
+    TotalStorageTB = round(sum(TENANT_TOTAL_DISK_USED_GB) / 1024.0, 1),
+    Avg_RiskSignals = round(avg(RiskSignals), 1),
+    PctWith5Signals = round(100.0 * countif(RiskSignals == 5) / count(), 1),
+    TopCountries = make_set(COUNTRY_CODE, 10)
+  by TENANT_LEVEL
+| order by HighRiskTenants desc
+
+
+// ============================================================================
+// STEP 13: WHITELISTED SKU VALIDATION — Are paid/enterprise SKUs truly safe?
+// Some SKUs are whitelisted from FAB action. Check if abuse exists there too.
+// Run against known whitelisted values from [FRAUD].[WHITELISTED_SKU] table.
+// ============================================================================
+
+// NOTE: Replace the whitelist values below with actual values from:
+//   SELECT SKU FROM [FRAUD].[WHITELISTED_SKU]
+// Common whitelisted SKUs typically include: E3, E5, M365 E3, M365 E5, etc.
+
+let whitelistedSKUs = dynamic([
+    "OFFICE 365 E3", "OFFICE 365 E5", "M365 E3", "M365 E5", 
+    "MICROSOFT 365 E3", "MICROSOFT 365 E5"
+]);
+TENANT_INFO
+| where TENANT_CATEGORY != "Consumer"
+| where TENANT_LEVEL in (whitelistedSKUs)
+| where TENANT_TOTAL_DISK_USED_GB > 10000  // >10 TB even on premium SKU
+| where TOTAL_ACTIVATED_USERS < 10
+| where toupper(coalesce(ISS500, "FALSE")) == "FALSE"
+| project 
+    SITE_SUBSCRIPTION_ID,
+    OMS_TENANT_ID,
+    TENANT_NAME,
+    TENANT_LEVEL,
+    COUNTRY_CODE,
+    TENANT_TOTAL_DISK_USED_GB,
+    StorageTB = round(TENANT_TOTAL_DISK_USED_GB / 1024.0, 1),
+    LICENSES_ENABLED,
+    TOTAL_ACTIVATED_USERS,
+    HAS_EVER_PAID,
+    HAS_ONLY_ONMICROSOFT_DOMAIN,
+    TENANT_CREATED_DATE
+| order by TENANT_TOTAL_DISK_USED_GB desc
+| take 50
+
+
+// ============================================================================
+// END — ANALYSIS NOTES
+// ============================================================================
+//
+// INTERPRETATION GUIDE:
+// 
+// 1. HIGH FRAUD CONCENTRATION SKUS (from Step 3):
+//    - If a cheap SKU has >5% fraud concentration → systemic abuse target
+//    - Compare to baseline: legitimate SKUs typically <0.1% fraud rate
+//
+// 2. STORAGE-PER-LICENSE ANOMALIES (from Step 8):
+//    - Normal: 0.5-2 GB/license for most enterprises
+//    - Suspicious: >10 GB/license
+//    - Definite abuse: >100 GB/license
+//
+// 3. KEY FRAUD PATTERNS TO LOOK FOR:
+//    a) "Cheap license, max storage" → Buy 1 F1 license ($2), fill 100+ TB
+//    b) "License inflation" → Claim 10K+ EDU/VL licenses, never activate
+//    c) "Trial extension" → E5 Developer eternally in "Trial" status
+//    d) "VL exploit" → Volume License gives SPO access without real payment
+//
+// 4. RECOMMENDED ACTIONS PER FINDING:
+//    - SKU with >10% fraud rate → Propose storage cap / provisioning gate
+//    - Individual tenants >10TB + <5 users → Direct FAB ingestion
+//    - License count > 10x activated users → Investigate license source
+//    - VL + never paid + high storage → Escalate to VL fraud team
+//
+// 5. NEXT STEPS:
+//    - Run Steps 1-3 first to identify which SKUs to focus on
+//    - Use Step 6 drill-downs for the top 2-3 problematic SKUs
+//    - Cross-reference worst offenders with RequestUsage (app fingerprinting)
+//    - Feed confirmed abusers into FAB ingestion pipeline
+// ============================================================================

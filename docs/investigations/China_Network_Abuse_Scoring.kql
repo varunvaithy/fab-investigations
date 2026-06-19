@@ -1,0 +1,157 @@
+// ============================================================================
+// China Network Abuse — Bulk Scoring Query (46K Tenant List)
+// Target: OdspFabKusto → fabdardb (MSIT)
+// Investigation: INV-015
+// Date: 2026-04-10
+// ============================================================================
+// 
+// This query scores all CN tenants against abuse signals refined through
+// 5 manual batches (217 tenants investigated, 167 confirmed abusive).
+//
+// OUTPUT: Scored tenant list ordered by abuse_score descending
+// USAGE: Run on Kusto Explorer against fabdardb, review top 1000+ results
+//
+// Expected distribution:
+//   score >= 80  → High confidence abusive → recommend block
+//   score 50-79  → Medium confidence → manual review needed
+//   score 30-49  → Low confidence → monitor
+//   score < 30   → Likely legitimate
+// ============================================================================
+
+// Step 1: Load the 46K tenant ID list as a datatable
+// NOTE: Replace the let statement below with your actual tenant list
+// For 46K tenants, use externaldata or paste the list
+let target_tenants = TENANT_INFO
+| where COUNTRY_CODE == "CN"
+;
+// Step 2: Score each tenant
+target_tenants
+| extend
+    // === STRONG NEGATIVE SIGNALS (legitimate indicators) ===
+    score_iss2200 = iff(ISS2200 == "TRUE", -100, 0),
+    score_vl = iff(HAS_VL == "TRUE", -80, 0),
+    score_iss500 = iff(ISS500 == "TRUE", -60, 0),
+    score_edu_legit = iff(TENANT_CATEGORY == "EDU" and ODB_SITE_COUNT > 200, -50, 0),
+    score_high_odb = iff(ODB_SITE_COUNT > 500 and HAS_EVER_PAID == "TRUE", -40, 0),
+    score_many_domains = iff(DOMAIN_COUNT > 5 and HAS_EVER_PAID == "TRUE", -30, 0),
+    score_paid_real = iff(HAS_EVER_PAID == "TRUE" and tolong(LICENSES_ENABLED) > 50, -30, 0),
+    //
+    // === STRONG POSITIVE SIGNALS (abuse indicators) ===
+    // Dev SKU abuse
+    score_e5dev = iff(TENANT_LEVEL has "E5 DEVELOPER", 25, 0),
+    score_e3dev = iff(TENANT_LEVEL has "E3 DEVELOPER", 25, 0),
+    // Non-paid/trial on high storage
+    score_nonpaid_storage = iff(
+        HAS_EVER_PAID == "FALSE" and TENANT_TOTAL_DISK_USED_GB > 1000, 30, 0),
+    score_trial_storage = iff(
+        TENANT_STATUS == "Trial" and TENANT_TOTAL_DISK_USED_GB > 500, 25, 0),
+    // License fraud (millions of licenses, few users)
+    score_license_fraud = iff(
+        tolong(LICENSES_ACQUIRED) > 1000000 and tolong(LICENSES_ENABLED) < 20, 30, 0),
+    // Massive storage overage (>10x quota)
+    score_storage_overage = iff(
+        TENANT_TOTAL_DISK_USED_GB > STORAGE_LIMIT_GB * 10 and TENANT_TOTAL_DISK_USED_GB > 1000, 30, 0),
+    // Very high storage on few ODB sites
+    score_concentrated_storage = iff(
+        TENANT_TOTAL_DISK_USED_GB > 5000 and ODB_SITE_COUNT < 10, 20, 0),
+    // Only onmicrosoft domain (no custom domain)
+    score_onmicrosoft_only = iff(
+        HAS_ONLY_ONMICROSOFT_DOMAIN == 1, 10, 0),
+    // === MODERATE POSITIVE SIGNALS ===
+    // November 2025 creation wave
+    score_nov2025 = iff(
+        TENANT_CREATED_DATE >= datetime(2025-11-01) and TENANT_CREATED_DATE < datetime(2025-12-01), 20, 0),
+    // Single user / very few users with high storage
+    score_few_users = iff(
+        tolong(LICENSES_ENABLED) <= 5 and TENANT_TOTAL_DISK_USED_GB > 1000, 15, 0),
+    // Brand impersonation (tenant name matches known brands)
+    score_brand = iff(
+        toupper(TENANT_NAME) in ("MICROSOFT", "MICROSOFT 365", "GOOGLEPLEX", "BROADCOM", "BROADCOM CORP", "DOUYIN") 
+        and HAS_VL != "TRUE" and ISS2200 != "TRUE", 50, 0),
+    // Low subscription count with dev SKU
+    score_low_subs = iff(
+        TOTAL_SUBSCRIPTIONS_COUNT <= 2 and (TENANT_LEVEL has "DEVELOPER"), 10, 0),
+    // EDU category but few ODB sites (potential EDU fraud)
+    score_edu_sus = iff(
+        TENANT_CATEGORY == "EDU" and ODB_SITE_COUNT < 10 and tolong(LICENSES_ENABLED) < 10, 20, 0)
+| extend 
+    abuse_score = 
+        score_iss2200 + score_vl + score_iss500 + score_edu_legit + 
+        score_high_odb + score_many_domains + score_paid_real +
+        score_e5dev + score_e3dev + 
+        score_nonpaid_storage + score_trial_storage +
+        score_license_fraud + score_storage_overage + score_concentrated_storage +
+        score_onmicrosoft_only + score_nov2025 + score_few_users +
+        score_brand + score_low_subs + score_edu_sus
+| extend risk_tier = case(
+    abuse_score >= 80, "CRITICAL",
+    abuse_score >= 50, "HIGH",
+    abuse_score >= 30, "MEDIUM",
+    abuse_score >= 0, "LOW",
+    "LEGITIMATE")
+| project 
+    SITE_SUBSCRIPTION_ID,
+    TENANT_NAME,
+    risk_tier,
+    abuse_score,
+    TENANT_LEVEL,
+    TENANT_STATUS,
+    HAS_EVER_PAID,
+    TENANT_CREATED_DATE,
+    TENANT_TOTAL_DISK_USED_GB,
+    STORAGE_LIMIT_GB,
+    ODB_SITE_COUNT,
+    tolong(LICENSES_ACQUIRED) as licenses_acquired,
+    tolong(LICENSES_ENABLED) as licenses_enabled,
+    DOMAIN_COUNT,
+    HAS_ONLY_ONMICROSOFT_DOMAIN,
+    TENANT_CATEGORY,
+    ISS2200,
+    HAS_VL,
+    ISS500,
+    // Breakdown of contributing signals for review
+    score_e5dev,
+    score_e3dev,
+    score_nonpaid_storage,
+    score_trial_storage,  
+    score_license_fraud,
+    score_storage_overage,
+    score_concentrated_storage,
+    score_nov2025,
+    score_brand,
+    score_edu_sus
+| order by abuse_score desc
+// Uncomment the line below to limit to high-signal tenants only:
+// | where abuse_score >= 30
+;
+
+// ============================================================================
+// SUPPLEMENTAL: Summary statistics
+// ============================================================================
+// Uncomment and run separately:
+//
+// target_tenants
+// | summarize 
+//     total = count(),
+//     critical = countif(abuse_score >= 80),
+//     high = countif(abuse_score >= 50 and abuse_score < 80),
+//     medium = countif(abuse_score >= 30 and abuse_score < 50),
+//     low = countif(abuse_score >= 0 and abuse_score < 30),
+//     legit = countif(abuse_score < 0),
+//     total_storage_tb = round(sum(TENANT_TOTAL_DISK_USED_GB) / 1024.0, 1),
+//     abusive_storage_tb = round(sumif(TENANT_TOTAL_DISK_USED_GB, abuse_score >= 50) / 1024.0, 1)
+
+// ============================================================================
+// SUPPLEMENTAL: Ring detection via shared registration patterns
+// Run against D2K (idsharedapac.southeastasia.kusto.windows.net)
+// ============================================================================
+// 
+// let cn_suspects = datatable(TenantId:string) [ /* paste high-score IDs */ ];
+// Identity
+// | where TenantId in (cn_suspects)
+// | summarize 
+//     tenants = make_set(TenantId),
+//     tenant_count = dcount(TenantId)
+//     by TechnicalNotificationMail
+// | where tenant_count > 1
+// | order by tenant_count desc

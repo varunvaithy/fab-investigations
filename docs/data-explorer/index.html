@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Data Explorer — FAB Portal</title>
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/manifest.js"></script>
+<style>
+  .page-header { padding: 32px 0 0; }
+  .page-header h1 {
+    font-size: 28px; font-weight: 800; letter-spacing: -1px;
+    background: linear-gradient(135deg, #e2e8f0, #06b6d4);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  }
+  .page-header p { color: var(--text-muted); font-size: 14px; margin-top: 4px; }
+
+  .dataset-picker {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 12px;
+    margin: 24px 0;
+  }
+  .ds-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 16px 20px;
+    cursor: pointer;
+    transition: all var(--transition);
+  }
+  .ds-card:hover { border-color: var(--border-hover); background: var(--bg-card-hover); }
+  .ds-card.active { border-color: var(--accent); background: var(--accent-glow); }
+  .ds-card h4 { font-size: 13px; font-weight: 600; margin-bottom: 4px; }
+  .ds-card .ds-info { font-size: 11px; color: var(--text-muted); }
+
+  .table-controls {
+    display: flex; align-items: center; gap: 12px; margin-bottom: 12px; flex-wrap: wrap;
+  }
+  .table-controls .search-input { min-width: 200px; font-size: 13px; padding: 8px 14px 8px 36px; }
+  .table-controls select {
+    background: var(--bg-surface); border: 1px solid var(--border); color: var(--text);
+    padding: 8px 12px; border-radius: var(--radius-xs); font-size: 12px; font-family: var(--font);
+    cursor: pointer; outline: none;
+  }
+  .table-controls select:focus { border-color: var(--accent); }
+  .table-controls label { font-size: 12px; color: var(--text-muted); }
+
+  .export-btn {
+    background: var(--accent-glow); border: 1px solid var(--accent); color: var(--accent-text);
+    padding: 8px 16px; border-radius: var(--radius-xs); font-size: 12px; font-weight: 600;
+    cursor: pointer; font-family: var(--font); transition: all var(--transition); margin-left: auto;
+  }
+  .export-btn:hover { background: var(--accent); color: white; }
+
+  .data-table-wrap {
+    max-height: 70vh;
+    overflow: auto;
+    margin-bottom: 16px;
+  }
+
+  .data-table thead th {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+  }
+
+  .col-highlight { background: rgba(99,102,241,0.05) !important; }
+
+  .loading-data {
+    text-align: center; padding: 60px; color: var(--text-muted);
+  }
+
+  .cell-fraud { color: var(--red); font-weight: 600; }
+  .cell-paid { color: var(--green); }
+  .cell-number { font-family: var(--font-mono); font-size: 12px; }
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="topnav-brand"><div class="logo">F</div>FAB Portal</div>
+  <div class="topnav-links">
+    <a href="../portal.html">Home</a>
+    <a href="../investigations/index.html">Investigations</a>
+    <a href="index.html" class="active">Data Explorer</a>
+    <a href="../queries/index.html">Query Library</a>
+    <a href="../biweekly-report/dashboard/index.html">Dashboard</a>
+  </div>
+</nav>
+
+<div class="container-wide">
+  <div class="page-header">
+    <h1>Data Explorer</h1>
+    <p>Browse, filter, sort, and export investigation datasets. Click a dataset to load it.</p>
+  </div>
+
+  <!-- Dataset picker -->
+  <div class="dataset-picker" id="datasetPicker"></div>
+
+  <!-- Table controls (hidden until data loaded) -->
+  <div id="tableSection" style="display:none;">
+    <div class="table-controls">
+      <input type="text" class="search-input" id="tableSearch" placeholder="Filter rows...">
+      <label>Rows per page:</label>
+      <select id="pageSize">
+        <option value="25">25</option>
+        <option value="50" selected>50</option>
+        <option value="100">100</option>
+        <option value="500">500</option>
+        <option value="all">All</option>
+      </select>
+      <button class="export-btn" id="exportBtn">Export Filtered CSV</button>
+    </div>
+
+    <div class="data-table-wrap" id="tableWrap">
+      <table class="data-table" id="dataTable">
+        <thead id="tableHead"></thead>
+        <tbody id="tableBody"></tbody>
+      </table>
+    </div>
+
+    <div class="table-footer" id="tableFooter">
+      <span id="rowInfo"></span>
+      <div class="pagination" id="pagination"></div>
+    </div>
+  </div>
+
+  <div class="loading-data" id="loadingData" style="display:none;">
+    Loading dataset...
+  </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  const picker = document.getElementById('datasetPicker');
+  const tableSection = document.getElementById('tableSection');
+  const loadingData = document.getElementById('loadingData');
+  const tableSearch = document.getElementById('tableSearch');
+  const pageSizeSelect = document.getElementById('pageSize');
+  const exportBtn = document.getElementById('exportBtn');
+
+  let allRows = [];
+  let headers = [];
+  let filteredRows = [];
+  let currentPage = 0;
+  let sortCol = -1;
+  let sortAsc = true;
+
+  // Render dataset cards
+  picker.innerHTML = DATA_FILES.map((df, i) => `
+    <div class="ds-card" data-idx="${i}">
+      <h4>${df.name}</h4>
+      <div class="ds-info">${df.file} · ~${df.rows} rows</div>
+    </div>
+  `).join('');
+
+  picker.addEventListener('click', e => {
+    const card = e.target.closest('.ds-card');
+    if (!card) return;
+    picker.querySelectorAll('.ds-card').forEach(c => c.classList.remove('active'));
+    card.classList.add('active');
+    loadDataset(DATA_FILES[parseInt(card.dataset.idx)]);
+  });
+
+  async function loadDataset(df) {
+    tableSection.style.display = 'none';
+    loadingData.style.display = 'block';
+
+    try {
+      const resp = await fetch('../' + df.file.replace(/^\.\.\//, '../'));
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const text = await resp.text();
+      parseCSV(text);
+      renderTable();
+      tableSection.style.display = 'block';
+    } catch (err) {
+      loadingData.innerHTML = `<p style="color:var(--red)">Failed to load: ${df.file}</p>
+        <p style="font-size:12px;margin-top:8px;">If running locally, start an HTTP server in the docs/ folder.</p>`;
+    }
+    loadingData.style.display = 'none';
+  }
+
+  function parseCSV(text) {
+    const lines = text.trim().split('\n');
+    headers = parseCSVLine(lines[0]);
+    allRows = [];
+    for (let i = 1; i < lines.length; i++) {
+      if (lines[i].trim()) {
+        allRows.push(parseCSVLine(lines[i]));
+      }
+    }
+    filteredRows = [...allRows];
+    currentPage = 0;
+    sortCol = -1;
+  }
+
+  function parseCSVLine(line) {
+    const result = [];
+    let current = '';
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (inQuotes) {
+        if (ch === '"' && line[i + 1] === '"') { current += '"'; i++; }
+        else if (ch === '"') { inQuotes = false; }
+        else { current += ch; }
+      } else {
+        if (ch === '"') { inQuotes = true; }
+        else if (ch === ',') { result.push(current.trim()); current = ''; }
+        else { current += ch; }
+      }
+    }
+    result.push(current.trim());
+    return result;
+  }
+
+  function renderTable() {
+    // Header
+    document.getElementById('tableHead').innerHTML = '<tr>' +
+      headers.map((h, i) => {
+        const arrow = sortCol === i ? (sortAsc ? ' ▲' : ' ▼') : ' ⇕';
+        const cls = sortCol === i ? 'sorted' : '';
+        return `<th class="${cls}" data-col="${i}">${escapeHtml(h)}<span class="sort-icon">${arrow}</span></th>`;
+      }).join('') + '</tr>';
+
+    // Filter
+    const q = tableSearch.value.toLowerCase();
+    filteredRows = q ? allRows.filter(row => row.some(cell => cell.toLowerCase().includes(q))) : [...allRows];
+
+    // Sort
+    if (sortCol >= 0) {
+      filteredRows.sort((a, b) => {
+        let va = a[sortCol] || '', vb = b[sortCol] || '';
+        const na = parseFloat(va), nb = parseFloat(vb);
+        if (!isNaN(na) && !isNaN(nb)) return sortAsc ? na - nb : nb - na;
+        return sortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
+      });
+    }
+
+    // Pagination
+    const pSize = pageSizeSelect.value === 'all' ? filteredRows.length : parseInt(pageSizeSelect.value);
+    const totalPages = Math.ceil(filteredRows.length / pSize) || 1;
+    if (currentPage >= totalPages) currentPage = totalPages - 1;
+    const start = currentPage * pSize;
+    const pageRows = filteredRows.slice(start, start + pSize);
+
+    // Body
+    document.getElementById('tableBody').innerHTML = pageRows.map(row =>
+      '<tr>' + row.map((cell, i) => {
+        let cls = '';
+        const h = headers[i]?.toLowerCase() || '';
+        if (cell === 'True' && h.includes('fraud')) cls = 'cell-fraud';
+        else if (cell === 'True' && h.includes('paid')) cls = 'cell-paid';
+        else if (!isNaN(parseFloat(cell)) && cell.length > 0) cls = 'cell-number';
+        return `<td class="${cls}" title="${escapeHtml(cell)}">${escapeHtml(cell)}</td>`;
+      }).join('') + '</tr>'
+    ).join('');
+
+    // Footer
+    document.getElementById('rowInfo').textContent =
+      `Showing ${start + 1}–${Math.min(start + pSize, filteredRows.length)} of ${filteredRows.length} rows` +
+      (filteredRows.length !== allRows.length ? ` (filtered from ${allRows.length})` : '');
+
+    // Pagination buttons
+    const pag = document.getElementById('pagination');
+    if (totalPages <= 1) {
+      pag.innerHTML = '';
+    } else {
+      let btns = '';
+      btns += `<button ${currentPage===0?'disabled':''} data-page="${currentPage-1}">‹</button>`;
+      for (let p = 0; p < totalPages && p < 10; p++) {
+        btns += `<button class="${p===currentPage?'active':''}" data-page="${p}">${p+1}</button>`;
+      }
+      if (totalPages > 10) btns += `<button disabled>…</button><button data-page="${totalPages-1}">${totalPages}</button>`;
+      btns += `<button ${currentPage>=totalPages-1?'disabled':''} data-page="${currentPage+1}">›</button>`;
+      pag.innerHTML = btns;
+    }
+  }
+
+  // Event: column sort
+  document.getElementById('tableHead').addEventListener('click', e => {
+    const th = e.target.closest('th');
+    if (!th) return;
+    const col = parseInt(th.dataset.col);
+    if (sortCol === col) { sortAsc = !sortAsc; }
+    else { sortCol = col; sortAsc = true; }
+    renderTable();
+  });
+
+  // Event: search
+  tableSearch.addEventListener('input', () => { currentPage = 0; renderTable(); });
+
+  // Event: page size
+  pageSizeSelect.addEventListener('change', () => { currentPage = 0; renderTable(); });
+
+  // Event: pagination
+  document.getElementById('pagination').addEventListener('click', e => {
+    if (e.target.tagName !== 'BUTTON' || e.target.disabled) return;
+    currentPage = parseInt(e.target.dataset.page);
+    renderTable();
+  });
+
+  // Event: export
+  exportBtn.addEventListener('click', () => {
+    const csv = [headers.join(','), ...filteredRows.map(r =>
+      r.map(c => c.includes(',') || c.includes('"') ? `"${c.replace(/"/g, '""')}"` : c).join(',')
+    )].join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'fab_export_' + new Date().toISOString().slice(0,10) + '.csv';
+    a.click();
+    URL.revokeObjectURL(url);
+  });
+
+  function escapeHtml(str) {
+    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  // Auto-load from URL param
+  const params = new URLSearchParams(window.location.search);
+  if (params.get('file')) {
+    const idx = DATA_FILES.findIndex(d => d.file === params.get('file'));
+    if (idx >= 0) {
+      picker.querySelectorAll('.ds-card')[idx]?.classList.add('active');
+      loadDataset(DATA_FILES[idx]);
+    }
+  }
+});
+</script>
+</body>
+</html>

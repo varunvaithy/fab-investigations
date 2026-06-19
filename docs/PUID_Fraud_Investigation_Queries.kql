@@ -1,0 +1,223 @@
+// PUID Fraud Investigation - Consumer OneDrive Queries
+// Run in Kusto Web Explorer: https://dataexplorer.azure.com
+// Cluster: spogdskustocluster.eastus2.kusto.windows.net
+// Database: SpoProd
+//
+// NOTE: The `user` column requires EUII access (column-level security policy).
+//       Run these queries with YOUR credentials in Kusto Web Explorer.
+//       MCP/automation tools see "SCRUBBED" and cannot filter by user.
+//
+// These are CONSUMER OneDrive accounts (1 PUID = 1 OneDrive site).
+// PUIDs converted to 16-char hex CID format (0003/0006 prefix = MSA accounts).
+
+// ============================================================
+// STEP 0: Verify your EUII access (run this first!)
+// If user shows actual values (not "SCRUBBED"), you have access.
+// ============================================================
+RequestUsage
+| where env_time >= ago(1h)
+| where tenantType == 'Consumer'
+| take 5
+| project user, siteSubscriptionId, app, fileType
+
+// ============================================================
+// STEP 1: Find consumer accounts - try BOTH decimal and hex formats
+// (The user field format depends on your cluster's configuration)
+// ============================================================
+// Try A: Decimal string format
+let PUIDs_decimal = dynamic([
+  '844425252900324', '844425833543908', '844425875944477', '844426097024785',
+  '844426833639647', '844427568760362', '844427576003646', '844427727666955',
+  '914791532355834', '914798282869310', '914798635720157', '914798668320875',
+  '914798779680617', '914799068032410', '914799632612533', '914800414590405',
+  '914800565515246', '914800705294289', '985154208589854', '985154722385936',
+  '985154843399588', '985155042364100', '985155051750809', '985155060562016',
+  '985155093519665', '985155102991406', '985156188787162', '985157208267214',
+  '985157448910777', '985157501616968', '985158002738842', '1055518734814340',
+  '1055519186027920', '1055521041143130', '1055521307531280', '1055521424114630',
+  '1688852014567020', '1688853467218560', '1759220758129460', '1829581009857080',
+  '1899945390930550', '1899946403516640'
+]);
+// Try B: 16-char hex CID format (0003xxxx = MSA, 0006xxxx = OrgId)
+let PUIDs_hex = dynamic([
+  '00030000133d0de4','0003000035d8f8e4','00030000385ff41d','00030000458d5f11',
+  '00030000717538df','000300009d46462a','000300009db4cc3e','00030000a6beff0b',
+  '00033fff805460fa','0003400112b10a3e','0003400127b91ddd','0003400129aa906b',
+  '00034001304dc769','00034001417dad9a','0003400163247cb5','0003400191c085c5',
+  '000340019abf73ee','00034001a3144fd1','00037ffe16a6e81e','00037ffe3546d010',
+  '00037ffe3c7d55a4','00037ffe48594ac4','00037ffe48e88599','00037ffe496ef860',
+  '00037ffe4b65dd31','00037ffe4bf6642e','00037ffe8cae51da','00037ffec97259ce',
+  '00037ffed7ca47b9','00037ffedaee8348','00037ffef8cd069a','0003bffd1b3e0c84',
+  '0003bffd36230590','0003bffda4b5d55a','0003bffdb4969810','0003bffdbb8983c6',
+  '0006000080680e6c','00060000d6fdc280','00064000805eab34','00067ffe862e2a38',
+  '0006bffd821e7a76','0006bffdbe7950e0'
+]);
+RequestUsage
+| where env_time >= ago(90d)
+| where tenantType == 'Consumer'
+| where user in (PUIDs_decimal) or user in (PUIDs_hex)
+| summarize 
+    SiteId = any(siteSubscriptionId),
+    Apps = make_set(app, 30),
+    TotalEgressGB = round(sum(blobReadBytes) / 1073741824.0, 2),
+    TotalIngressGB = round(sum(blobWriteBytes) / 1073741824.0, 2),
+    RequestCount = count(),
+    FileTypes = make_set(fileType, 30),
+    FirstSeen = min(env_time),
+    LastSeen = max(env_time),
+    Regions = make_set(svc_azureRegion)
+  by user
+| order by TotalIngressGB desc
+
+// ============================================================
+// STEP 2: App fingerprinting (detect rclone, StableBit, etc.)
+// ============================================================
+let PUIDs_decimal = dynamic(['844425252900324','844425833543908','844425875944477','844426097024785','844426833639647','844427568760362','844427576003646','844427727666955','914791532355834','914798282869310','914798635720157','914798668320875','914798779680617','914799068032410','914799632612533','914800414590405','914800565515246','914800705294289','985154208589854','985154722385936','985154843399588','985155042364100','985155051750809','985155060562016','985155093519665','985155102991406','985156188787162','985157208267214','985157448910777','985157501616968','985158002738842','1055518734814340','1055519186027920','1055521041143130','1055521307531280','1055521424114630','1688852014567020','1688853467218560','1759220758129460','1829581009857080','1899945390930550','1899946403516640']);
+let PUIDs_hex = dynamic(['00030000133d0de4','0003000035d8f8e4','00030000385ff41d','00030000458d5f11','00030000717538df','000300009d46462a','000300009db4cc3e','00030000a6beff0b','00033fff805460fa','0003400112b10a3e','0003400127b91ddd','0003400129aa906b','00034001304dc769','00034001417dad9a','0003400163247cb5','0003400191c085c5','000340019abf73ee','00034001a3144fd1','00037ffe16a6e81e','00037ffe3546d010','00037ffe3c7d55a4','00037ffe48594ac4','00037ffe48e88599','00037ffe496ef860','00037ffe4b65dd31','00037ffe4bf6642e','00037ffe8cae51da','00037ffec97259ce','00037ffed7ca47b9','00037ffedaee8348','00037ffef8cd069a','0003bffd1b3e0c84','0003bffd36230590','0003bffda4b5d55a','0003bffdb4969810','0003bffdbb8983c6','0006000080680e6c','00060000d6fdc280','00064000805eab34','00067ffe862e2a38','0006bffd821e7a76','0006bffdbe7950e0']);
+RequestUsage
+| where env_time >= ago(90d)
+| where tenantType == 'Consumer'
+| where user in (PUIDs_decimal) or user in (PUIDs_hex)
+| summarize 
+    Requests = count(),
+    EgressGB = round(sum(blobReadBytes) / 1073741824.0, 2),
+    IngressGB = round(sum(blobWriteBytes) / 1073741824.0, 2)
+  by user, app
+| order by user, Requests desc
+
+// ============================================================
+// STEP 3: File type distribution (piracy/CDN indicators)
+// ============================================================
+let PUIDs_decimal = dynamic(['844425252900324','844425833543908','844425875944477','844426097024785','844426833639647','844427568760362','844427576003646','844427727666955','914791532355834','914798282869310','914798635720157','914798668320875','914798779680617','914799068032410','914799632612533','914800414590405','914800565515246','914800705294289','985154208589854','985154722385936','985154843399588','985155042364100','985155051750809','985155060562016','985155093519665','985155102991406','985156188787162','985157208267214','985157448910777','985157501616968','985158002738842','1055518734814340','1055519186027920','1055521041143130','1055521307531280','1055521424114630','1688852014567020','1688853467218560','1759220758129460','1829581009857080','1899945390930550','1899946403516640']);
+let PUIDs_hex = dynamic(['00030000133d0de4','0003000035d8f8e4','00030000385ff41d','00030000458d5f11','00030000717538df','000300009d46462a','000300009db4cc3e','00030000a6beff0b','00033fff805460fa','0003400112b10a3e','0003400127b91ddd','0003400129aa906b','00034001304dc769','00034001417dad9a','0003400163247cb5','0003400191c085c5','000340019abf73ee','00034001a3144fd1','00037ffe16a6e81e','00037ffe3546d010','00037ffe3c7d55a4','00037ffe48594ac4','00037ffe48e88599','00037ffe496ef860','00037ffe4b65dd31','00037ffe4bf6642e','00037ffe8cae51da','00037ffec97259ce','00037ffed7ca47b9','00037ffedaee8348','00037ffef8cd069a','0003bffd1b3e0c84','0003bffd36230590','0003bffda4b5d55a','0003bffdb4969810','0003bffdbb8983c6','0006000080680e6c','00060000d6fdc280','00064000805eab34','00067ffe862e2a38','0006bffd821e7a76','0006bffdbe7950e0']);
+RequestUsage
+| where env_time >= ago(90d)
+| where tenantType == 'Consumer'
+| where user in (PUIDs_decimal) or user in (PUIDs_hex)
+| where isnotempty(fileType)
+| summarize Requests = count(), EgressGB = round(sum(blobReadBytes)/1073741824.0, 2) by user, fileType
+| order by user, EgressGB desc
+
+// ============================================================
+// STEP 4: HTTP status + time-series (streaming/burst detection)
+// ============================================================
+let PUIDs_decimal = dynamic(['844425252900324','844425833543908','844425875944477','844426097024785','844426833639647','844427568760362','844427576003646','844427727666955','914791532355834','914798282869310','914798635720157','914798668320875','914798779680617','914799068032410','914799632612533','914800414590405','914800565515246','914800705294289','985154208589854','985154722385936','985154843399588','985155042364100','985155051750809','985155060562016','985155093519665','985155102991406','985156188787162','985157208267214','985157448910777','985157501616968','985158002738842','1055518734814340','1055519186027920','1055521041143130','1055521307531280','1055521424114630','1688852014567020','1688853467218560','1759220758129460','1829581009857080','1899945390930550','1899946403516640']);
+let PUIDs_hex = dynamic(['00030000133d0de4','0003000035d8f8e4','00030000385ff41d','00030000458d5f11','00030000717538df','000300009d46462a','000300009db4cc3e','00030000a6beff0b','00033fff805460fa','0003400112b10a3e','0003400127b91ddd','0003400129aa906b','00034001304dc769','00034001417dad9a','0003400163247cb5','0003400191c085c5','000340019abf73ee','00034001a3144fd1','00037ffe16a6e81e','00037ffe3546d010','00037ffe3c7d55a4','00037ffe48594ac4','00037ffe48e88599','00037ffe496ef860','00037ffe4b65dd31','00037ffe4bf6642e','00037ffe8cae51da','00037ffec97259ce','00037ffed7ca47b9','00037ffedaee8348','00037ffef8cd069a','0003bffd1b3e0c84','0003bffd36230590','0003bffda4b5d55a','0003bffdb4969810','0003bffdbb8983c6','0006000080680e6c','00060000d6fdc280','00064000805eab34','00067ffe862e2a38','0006bffd821e7a76','0006bffdbe7950e0']);
+RequestUsage
+| where env_time >= ago(90d)
+| where tenantType == 'Consumer'
+| where user in (PUIDs_decimal) or user in (PUIDs_hex)
+| summarize Requests = count() by user, httpStatus
+| order by user, Requests desc
+;
+// Time-series (run separately)
+let PUIDs_decimal = dynamic(['844425252900324','844425833543908','844425875944477','844426097024785','844426833639647','844427568760362','844427576003646','844427727666955','914791532355834','914798282869310','914798635720157','914798668320875','914798779680617','914799068032410','914799632612533','914800414590405','914800565515246','914800705294289','985154208589854','985154722385936','985154843399588','985155042364100','985155051750809','985155060562016','985155093519665','985155102991406','985156188787162','985157208267214','985157448910777','985157501616968','985158002738842','1055518734814340','1055519186027920','1055521041143130','1055521307531280','1055521424114630','1688852014567020','1688853467218560','1759220758129460','1829581009857080','1899945390930550','1899946403516640']);
+let PUIDs_hex = dynamic(['00030000133d0de4','0003000035d8f8e4','00030000385ff41d','00030000458d5f11','00030000717538df','000300009d46462a','000300009db4cc3e','00030000a6beff0b','00033fff805460fa','0003400112b10a3e','0003400127b91ddd','0003400129aa906b','00034001304dc769','00034001417dad9a','0003400163247cb5','0003400191c085c5','000340019abf73ee','00034001a3144fd1','00037ffe16a6e81e','00037ffe3546d010','00037ffe3c7d55a4','00037ffe48594ac4','00037ffe48e88599','00037ffe496ef860','00037ffe4b65dd31','00037ffe4bf6642e','00037ffe8cae51da','00037ffec97259ce','00037ffed7ca47b9','00037ffedaee8348','00037ffef8cd069a','0003bffd1b3e0c84','0003bffd36230590','0003bffda4b5d55a','0003bffdb4969810','0003bffdbb8983c6','0006000080680e6c','00060000d6fdc280','00064000805eab34','00067ffe862e2a38','0006bffd821e7a76','0006bffdbe7950e0']);
+RequestUsage
+| where env_time >= ago(90d)
+| where tenantType == 'Consumer'
+| where user in (PUIDs_decimal) or user in (PUIDs_hex)
+| summarize 
+    DailyRequests = count(),
+    DailyEgressGB = round(sum(blobReadBytes)/1073741824.0, 2),
+    DailyIngressGB = round(sum(blobWriteBytes)/1073741824.0, 2)
+  by user, bin(env_time, 1d)
+| order by user, env_time asc
+
+// ============================================================
+// STEP 5: ALTERNATIVE - No EUII access? Find suspicious consumer
+//         sites by BEHAVIOR patterns (rclone, high ingress, etc.)
+//         This works WITHOUT user column access.
+// ============================================================
+// 5A: Consumer sites using rclone (strong abuse indicator)
+RequestUsage
+| where env_time >= ago(30d)
+| where tenantType == 'Consumer'
+| where app == 'rclone'
+| summarize 
+    Requests = count(),
+    IngressGB = round(sum(blobWriteBytes)/1073741824.0, 2),
+    EgressGB = round(sum(blobReadBytes)/1073741824.0, 2),
+    FirstSeen = min(env_time),
+    LastSeen = max(env_time)
+  by siteId
+| where IngressGB > 1 or EgressGB > 1
+| order by IngressGB desc
+| take 100
+
+// 5B: Top consumer sites by total ingress (storage abuse)
+RequestUsage
+| where env_time >= ago(30d)
+| where tenantType == 'Consumer'
+| summarize 
+    IngressGB = round(sum(blobWriteBytes)/1073741824.0, 2),
+    EgressGB = round(sum(blobReadBytes)/1073741824.0, 2),
+    Requests = count(),
+    Apps = make_set(app, 20),
+    FileTypes = make_set(fileType, 20)
+  by siteId
+| where IngressGB > 50
+| order by IngressGB desc
+| take 200
+
+// 5C: Consumer sites with suspicious file types (media piracy)
+RequestUsage
+| where env_time >= ago(30d)
+| where tenantType == 'Consumer'
+| where fileType in ('MKV','MP4','AVI','RAR','ZIP','7Z','ISO','REMUX')
+| summarize 
+    Requests = count(),
+    IngressGB = round(sum(blobWriteBytes)/1073741824.0, 2),
+    EgressGB = round(sum(blobReadBytes)/1073741824.0, 2),
+    FileTypes = make_set(fileType, 10),
+    Apps = make_set(app, 10)
+  by siteId
+| where IngressGB > 10
+| order by IngressGB desc
+| take 100
+
+// 5D: Consumer sites with StableBit CloudDrive (virtual disk abuse)
+RequestUsage
+| where env_time >= ago(30d)
+| where tenantType == 'Consumer'
+| where app has 'StableBit' or app has 'CloudDrive'
+| summarize 
+    Requests = count(),
+    IngressGB = round(sum(blobWriteBytes)/1073741824.0, 2),
+    EgressGB = round(sum(blobReadBytes)/1073741824.0, 2)
+  by siteId
+| order by IngressGB desc
+
+// ============================================================
+// STEP 6: Once you have siteIds (from EUII queries or behavior),
+//         deep-dive a specific site
+// ============================================================
+// Replace <SITE_ID_HERE> with actual siteId GUID
+let targetSite = '<SITE_ID_HERE>';
+RequestUsage
+| where env_time >= ago(90d)
+| where tenantType == 'Consumer'
+| where siteId == targetSite
+| summarize 
+    TotalRequests = count(),
+    IngressGB = round(sum(blobWriteBytes)/1073741824.0, 2),
+    EgressGB = round(sum(blobReadBytes)/1073741824.0, 2),
+    Apps = make_set(app, 30),
+    FileTypes = make_set(fileType, 30),
+    HttpStatuses = make_set(httpStatus, 20),
+    Regions = make_set(svc_azureRegion, 10),
+    FirstSeen = min(env_time),
+    LastSeen = max(env_time)
+;
+// Time-series for a specific site
+let targetSite = '<SITE_ID_HERE>';
+RequestUsage
+| where env_time >= ago(90d)
+| where tenantType == 'Consumer'
+| where siteId == targetSite
+| summarize 
+    DailyRequests = count(),
+    DailyIngressGB = round(sum(blobWriteBytes)/1073741824.0, 2),
+    DailyEgressGB = round(sum(blobReadBytes)/1073741824.0, 2)
+  by bin(env_time, 1d)
+| order by env_time asc

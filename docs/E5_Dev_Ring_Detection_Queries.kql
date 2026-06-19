@@ -1,0 +1,232 @@
+// ============================================================================
+// E5 Developer 4-Char Abuse Ring — Detection Queries
+// Target: OdspFabKusto → fabdardb (MSIT) or fabdardbpp (SDF)
+// Date: 2026-03-24
+// ============================================================================
+//
+// RING FINGERPRINT (all conditions must match):
+//   - TENANT_LEVEL = "E5 DEVELOPER"
+//   - HAS_EVER_PAID = FALSE
+//   - TENANT_STATUS = Trial
+//   - 4-char uppercase tenant name (regex: ^[A-Z]{4}$)
+//   - HAS_ONLY_ONMICROSOFT_DOMAIN = 1
+//   - ODSITE_COUNT between 20 and 25
+//   - TENANT_TOTAL_DISK_USED_GB > 20,000 (>20 TB)
+//   - LICENSES_ENABLED = 25
+//   - Created between June 2023 and January 2024
+//   - D2KINSTANCE = "Europe" (primarily)
+//   - Empty CITY field
+//
+// Known: 31 confirmed ring members (from 50-tenant investigation)
+// Expected: Many more likely exist
+
+// ============================================================================
+// QUERY 1: Core Ring Detection — Strict (4-char names, high storage)
+// Run this FIRST to find the most obvious ring members
+// ============================================================================
+
+TENANT_INFO
+| where TENANT_LEVEL == "E5 DEVELOPER"
+    and toupper(coalesce(HAS_EVER_PAID, "FALSE")) == "FALSE"
+    and HAS_ONLY_ONMICROSOFT_DOMAIN == 1
+    and strlen(TENANT_NAME) == 4
+    and TENANT_NAME matches regex "^[A-Z]{4}$"
+    and ODSITE_COUNT >= 20
+    and ODSITE_COUNT <= 25
+    and TENANT_TOTAL_DISK_USED_GB > 20000
+| project 
+    SITE_SUBSCRIPTION_ID,
+    TENANT_NAME,
+    COUNTRY_CODE,
+    TENANT_LEVEL,
+    TENANT_TOTAL_DISK_USED_GB,
+    ODSITE_COUNT,
+    TENANT_CREATED_DATE,
+    LICENSES_ENABLED,
+    LICENSES_ACQUIRED,
+    HAS_EVER_PAID,
+    SESSION_COUNT,
+    TOTAL_ACTIVATED_USERS,
+    D2KINSTANCE,
+    CITY
+| order by TENANT_TOTAL_DISK_USED_GB desc
+
+// ============================================================================
+// QUERY 2: Broader Detection — Relaxed name constraint
+// Catches variants like DEEPBYTE (>4 chars) or future evolution
+// ============================================================================
+
+TENANT_INFO
+| where TENANT_LEVEL == "E5 DEVELOPER"
+    and toupper(coalesce(HAS_EVER_PAID, "FALSE")) == "FALSE"
+    and HAS_ONLY_ONMICROSOFT_DOMAIN == 1
+    and strlen(TENANT_NAME) >= 3
+    and strlen(TENANT_NAME) <= 10
+    and TENANT_NAME matches regex "^[A-Z0-9]+$"
+    and ODSITE_COUNT >= 15
+    and TENANT_TOTAL_DISK_USED_GB > 20000
+    and CITY == ""
+| project 
+    SITE_SUBSCRIPTION_ID,
+    TENANT_NAME,
+    COUNTRY_CODE,
+    TENANT_LEVEL,
+    TENANT_TOTAL_DISK_USED_GB,
+    ODSITE_COUNT,
+    TENANT_CREATED_DATE,
+    LICENSES_ENABLED,
+    LICENSES_ACQUIRED,
+    D2KINSTANCE,
+    CITY,
+    TOTAL_ACTIVATED_USERS,
+    SESSION_COUNT
+| order by TENANT_TOTAL_DISK_USED_GB desc
+
+// ============================================================================
+// QUERY 3: Country distribution — Shows ring geography + total impact
+// Useful for executive reporting
+// ============================================================================
+
+TENANT_INFO
+| where TENANT_LEVEL == "E5 DEVELOPER"
+    and toupper(coalesce(HAS_EVER_PAID, "FALSE")) == "FALSE"
+    and HAS_ONLY_ONMICROSOFT_DOMAIN == 1
+    and strlen(TENANT_NAME) == 4
+    and TENANT_NAME matches regex "^[A-Z]{4}$"
+    and ODSITE_COUNT >= 20
+    and TENANT_TOTAL_DISK_USED_GB > 20000
+| summarize 
+    TenantCount = count(),
+    TotalStorageTB = sum(TENANT_TOTAL_DISK_USED_GB) / 1024.0,
+    AvgStorageTB = avg(TENANT_TOTAL_DISK_USED_GB) / 1024.0,
+    MinCreated = min(TENANT_CREATED_DATE),
+    MaxCreated = max(TENANT_CREATED_DATE)
+    by COUNTRY_CODE
+| order by TenantCount desc
+
+// ============================================================================
+// QUERY 4: Grand total — Overall ring impact summary
+// ============================================================================
+
+TENANT_INFO
+| where TENANT_LEVEL == "E5 DEVELOPER"
+    and toupper(coalesce(HAS_EVER_PAID, "FALSE")) == "FALSE"
+    and HAS_ONLY_ONMICROSOFT_DOMAIN == 1
+    and strlen(TENANT_NAME) == 4
+    and TENANT_NAME matches regex "^[A-Z]{4}$"
+    and ODSITE_COUNT >= 20
+    and TENANT_TOTAL_DISK_USED_GB > 20000
+| summarize 
+    TotalTenants = count(),
+    TotalStorageTB = round(sum(TENANT_TOTAL_DISK_USED_GB) / 1024.0, 1),
+    TotalStoragePB = round(sum(TENANT_TOTAL_DISK_USED_GB) / 1048576.0, 2),
+    AvgStorageTB = round(avg(TENANT_TOTAL_DISK_USED_GB) / 1024.0, 1),
+    MinStorageTB = round(min(TENANT_TOTAL_DISK_USED_GB) / 1024.0, 1),
+    MaxStorageTB = round(max(TENANT_TOTAL_DISK_USED_GB) / 1024.0, 1),
+    Countries = dcount(COUNTRY_CODE),
+    EarliestCreated = min(TENANT_CREATED_DATE),
+    LatestCreated = max(TENANT_CREATED_DATE)
+
+// ============================================================================
+// QUERY 5: Cross-reference with FAB — Find which ring members are already tracked
+// Run on fabdardb if STATUS column is available, or on SQL
+// ============================================================================
+
+TENANT_INFO
+| where TENANT_LEVEL == "E5 DEVELOPER"
+    and toupper(coalesce(HAS_EVER_PAID, "FALSE")) == "FALSE"
+    and HAS_ONLY_ONMICROSOFT_DOMAIN == 1
+    and strlen(TENANT_NAME) == 4
+    and TENANT_NAME matches regex "^[A-Z]{4}$"
+    and ODSITE_COUNT >= 20
+    and TENANT_TOTAL_DISK_USED_GB > 20000
+| project 
+    SITE_SUBSCRIPTION_ID,
+    TENANT_NAME,
+    COUNTRY_CODE,
+    TENANT_TOTAL_DISK_USED_GB,
+    STATUS,
+    TENANT_CREATED_DATE
+| extend InFAB = isnotempty(STATUS)
+| summarize 
+    Total = count(),
+    InFAB = countif(InFAB),
+    NotInFAB = countif(not(InFAB))
+
+// ============================================================================
+// QUERY 6: Creation timeline — Detect provisioning waves
+// ============================================================================
+
+TENANT_INFO
+| where TENANT_LEVEL == "E5 DEVELOPER"
+    and toupper(coalesce(HAS_EVER_PAID, "FALSE")) == "FALSE"
+    and HAS_ONLY_ONMICROSOFT_DOMAIN == 1
+    and strlen(TENANT_NAME) == 4
+    and TENANT_NAME matches regex "^[A-Z]{4}$"
+    and ODSITE_COUNT >= 20
+    and TENANT_TOTAL_DISK_USED_GB > 20000
+| extend CreationWeek = startofweek(TENANT_CREATED_DATE)
+| summarize NewTenants = count() by CreationWeek
+| order by CreationWeek asc
+| render timechart
+
+// ============================================================================
+// QUERY 7: Verify known 31 members are all captured
+// Use this to confirm the query catches all known ring members
+// ============================================================================
+
+let known_ring = dynamic([
+    '9e2edf37-07ef-44df-94b7-d03bda7ee3d6',  // IHQV - LT
+    'c765c9c7-2bb1-4e2a-b06e-f2fc05a8ab08',  // HXGF - GB
+    '09f2df07-28a3-4697-9f6c-aa370e93d6cd',  // KJYS - PT
+    '11d0ddd2-2d7f-43ef-9c3b-06a314d8a87b',  // RPEJ - RO
+    '19239d6d-0019-4ee7-abc2-12ec0aaf17e1',  // ZMDI - LT
+    '1bb9aeb6-f14e-4c3c-a6c3-79e3d7b77ce3',  // FTAF - EE
+    '215b8b0e-fa59-424b-b53f-54ffa2236e9d',  // WQHS - SI
+    '23fdcd94-be71-4b91-8df2-9b2e12a67dfe',  // EKBI - LV
+    '28eb0462-8ea1-4c5a-a48f-3cfce23b95c9',  // PZGU - RO
+    '30c755cc-2b93-4ee2-bcf4-c2a8be5ef7e1',  // JPTK - LT
+    '34c96869-10c0-4adf-b2c6-fef2e6e2e7b2',  // WODX - LT
+    '35ff20bc-d0b8-4750-9097-9004c1e4daad',  // AWZS - LT
+    '36560e55-7565-4d49-8274-fd0649ecfe2a',  // FUQX - PL
+    '3d9b8222-9ec7-4f84-968b-27a2bfa18f82',  // QNYA - EE
+    '3e26746b-9006-4dfe-8743-ee529be52cbe',  // YEQX - PL
+    '40be4ab0-889c-4ae6-809c-11b714bad085',  // EJTD - EE
+    '40f232e0-2ff1-48e1-b154-24fbf2fad2a4',  // ROOW - GB
+    '410b5298-ea9b-4ca7-a9ee-12f176f07af2',  // HSFU - GB
+    '44918409-5f88-4436-8e52-233fb72507c0',  // GQBP - EE
+    '47350884-41f2-4838-88b5-9d2820c92bec',  // IXRE - GB
+    '5c0ef4e9-9a1f-41ce-89a6-5b854e07030f',  // EWHG - GB
+    '62659a74-87e0-41f7-a7e0-9fe658cf36b9',  // IGFU - LV
+    '65e7eeee-b65e-473a-bbfb-ee243097a34d',  // KQIU - EE
+    '6a779e69-99f2-4ad0-aa2b-216146b18443',  // ZYVH - GB
+    '6f5b884d-6109-47d8-abc1-d922b7dd2d78',  // EHJW - IL
+    '72aae8fc-5507-41a2-b516-a42ba594ed2f',  // BIXW - EE
+    '7b127372-ef6c-4c4b-b2be-26a2f137afac',  // CCZK - LT
+    '7cc6ac3e-26c0-4c77-82dc-6066b1c1ca17',  // TNRX - ES
+    '7d811bd2-0cb2-43de-84c0-ad2b5515f609',  // DEEPBYTE - BB
+    '84a5de99-ecde-4d4c-9b06-8af32120c953',  // ZFCF - LV
+    '8adf047c-a733-4570-abc1-3dcbe2b621e8'   // WEUB - PL
+]);
+TENANT_INFO
+| where SITE_SUBSCRIPTION_ID in (known_ring)
+| project SITE_SUBSCRIPTION_ID, TENANT_NAME, COUNTRY_CODE, TENANT_TOTAL_DISK_USED_GB
+| order by TENANT_NAME asc
+
+// ============================================================================
+// QUERY 8: Full extraction of all ring members — For bulk ingestion to FAB
+// Outputs tenant IDs in comma-separated format for FAB ingestion
+// ============================================================================
+
+TENANT_INFO
+| where TENANT_LEVEL == "E5 DEVELOPER"
+    and toupper(coalesce(HAS_EVER_PAID, "FALSE")) == "FALSE"
+    and HAS_ONLY_ONMICROSOFT_DOMAIN == 1
+    and strlen(TENANT_NAME) == 4
+    and TENANT_NAME matches regex "^[A-Z]{4}$"
+    and ODSITE_COUNT >= 20
+    and ODSITE_COUNT <= 25
+    and TENANT_TOTAL_DISK_USED_GB > 20000
+| summarize TenantIds = make_list(SITE_SUBSCRIPTION_ID)
+| mv-expand TenantId = TenantIds to typeof(string)
+| project TenantId

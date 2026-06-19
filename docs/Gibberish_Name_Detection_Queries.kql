@@ -1,0 +1,297 @@
+// ============================================================================
+// Gibberish Tenant Name Detection — Kusto Queries
+// Target: OdspFabKusto → TENANT_INFO
+// Date: 2026-03-31
+// Purpose: Identify tenants with gibberish/synthetic names likely indicating
+//          fraudulent or automated tenant creation.
+// ============================================================================
+//
+// GIBBERISH SIGNALS (implemented server-side in GibberishNameDetector.cs):
+//   - Abnormal vowel-to-consonant ratio (< 15% or > 75% vowels)
+//   - Long consonant clusters (5+ consecutive consonants)
+//   - Rare/impossible bigram combinations (e.g., "zx", "qz", "jx")
+//   - High character entropy for short strings (randomness)
+//   - Keyboard walk patterns (e.g., "qwerty", "asdfg")
+//   - Repetitive characters (e.g., "aaaaaa", "ababab")
+//   - No recognizable English word fragments
+//
+// COMPLEMENTARY KUSTO SIGNALS (filter population to high-value targets):
+//   - Non-paid, trial, or developer tenants
+//   - Only onmicrosoft.com domain (no custom domain)
+//   - Low or zero MAU (Monthly Active Users)
+//   - Recently created tenants
+//   - No social/web presence indicators
+
+// ============================================================================
+// QUERY 1: Regex-based gibberish name detection — Consonant-heavy names
+// Finds names with 4+ consecutive consonants (no vowels), no custom domain
+// ============================================================================
+
+TENANT_INFO
+| where HAS_ONLY_ONMICROSOFT_DOMAIN == 1
+    and toupper(coalesce(HAS_EVER_PAID, "FALSE")) == "FALSE"
+    and toupper(coalesce(ISS500, "FALSE")) == "FALSE"
+    and toupper(coalesce(ISS2200, "FALSE")) == "FALSE"
+    and strlen(TENANT_NAME) >= 4
+    and strlen(TENANT_NAME) <= 30
+    // Match names with 4+ consecutive consonants (strong gibberish signal)
+    and TENANT_NAME matches regex "[bcdfghjklmnpqrstvwxyzBCDFGHJKLMNPQRSTVWXYZ]{4,}"
+    // Exclude names that are all uppercase 3-4 chars (may be acronyms)
+    and not(TENANT_NAME matches regex "^[A-Z]{2,4}$")
+| extend 
+    NameLength = strlen(TENANT_NAME),
+    VowelCount = countof(tolower(TENANT_NAME), "a") + countof(tolower(TENANT_NAME), "e") + 
+                 countof(tolower(TENANT_NAME), "i") + countof(tolower(TENANT_NAME), "o") + 
+                 countof(tolower(TENANT_NAME), "u"),
+    LetterCount = countof(tolower(TENANT_NAME), @"[a-z]", "regex"),
+    HasDigits = TENANT_NAME matches regex "[0-9]"
+| extend VowelRatio = round(todouble(VowelCount) / todouble(LetterCount), 2)
+| where VowelRatio < 0.20 or VowelRatio > 0.75
+| project 
+    SITE_SUBSCRIPTION_ID,
+    TENANT_NAME,
+    CURRENT_DEFAULT_DOMAIN,
+    NameLength,
+    VowelRatio,
+    TENANT_LEVEL,
+    TENANT_TYPE,
+    COUNTRY_CODE,
+    TENANT_CREATED_DATE,
+    TENANT_TOTAL_DISK_USED_GB,
+    TOTAL_ACTIVATED_USERS,
+    SESSION_COUNT,
+    LICENSES_ENABLED,
+    HAS_EVER_PAID,
+    D2KINSTANCE
+| order by VowelRatio asc, TENANT_TOTAL_DISK_USED_GB desc
+
+// ============================================================================
+// QUERY 2: Random/high-entropy names — Short names with no word patterns
+// Catches randomly generated tenant names (e.g., "xk7q2m", "bfptzwn")
+// ============================================================================
+
+TENANT_INFO
+| where HAS_ONLY_ONMICROSOFT_DOMAIN == 1
+    and toupper(coalesce(HAS_EVER_PAID, "FALSE")) == "FALSE"
+    and toupper(coalesce(ISS500, "FALSE")) == "FALSE"
+    and toupper(coalesce(ISS2200, "FALSE")) == "FALSE"
+    and strlen(TENANT_NAME) >= 5
+    and strlen(TENANT_NAME) <= 15
+    // Name is all alphanumeric (no spaces, company-like formatting)
+    and TENANT_NAME matches regex "^[a-zA-Z0-9]+$"
+    // Exclude names containing common English words
+    and not(tolower(TENANT_NAME) has_any ("tech", "soft", "corp", "data", "info", "web", "net",
+            "cloud", "dev", "lab", "test", "demo", "group", "global", "media", "digital",
+            "system", "shop", "store", "edu", "school", "health", "care", "bank", "trade",
+            "auto", "build", "home", "green", "blue", "star", "pro", "smart", "team",
+            "work", "hub", "world", "city", "north", "south", "east", "west", "open",
+            "new", "first", "one", "best", "top", "core", "solutions", "services"))
+    // Must contain digits mixed with letters (common in auto-generated names)
+    and TENANT_NAME matches regex "[a-zA-Z].*[0-9]|[0-9].*[a-zA-Z]"
+| extend 
+    NameLength = strlen(TENANT_NAME),
+    DigitCount = countof(TENANT_NAME, @"[0-9]", "regex"),
+    LetterCount = countof(TENANT_NAME, @"[a-zA-Z]", "regex")
+| extend DigitRatio = round(todouble(DigitCount) / todouble(NameLength), 2)
+| where DigitRatio > 0.25 and DigitRatio < 0.80
+| project 
+    SITE_SUBSCRIPTION_ID,
+    TENANT_NAME,
+    CURRENT_DEFAULT_DOMAIN,
+    NameLength,
+    DigitRatio,
+    TENANT_LEVEL,
+    TENANT_TYPE,
+    COUNTRY_CODE,
+    TENANT_CREATED_DATE,
+    TENANT_TOTAL_DISK_USED_GB,
+    TOTAL_ACTIVATED_USERS,
+    SESSION_COUNT,
+    LICENSES_ENABLED,
+    HAS_EVER_PAID,
+    D2KINSTANCE
+| order by TENANT_TOTAL_DISK_USED_GB desc
+
+// ============================================================================
+// QUERY 3: Suspicious names + behavioral signals combined
+// Most conservative query — combines name gibberish signals with
+// behavioral fraud indicators for highest-confidence matches
+// ============================================================================
+
+TENANT_INFO
+| where HAS_ONLY_ONMICROSOFT_DOMAIN == 1
+    and toupper(coalesce(HAS_EVER_PAID, "FALSE")) == "FALSE"
+    and toupper(coalesce(ISS500, "FALSE")) == "FALSE"
+    and toupper(coalesce(ISS2200, "FALSE")) == "FALSE"
+    and strlen(TENANT_NAME) >= 4
+    and strlen(TENANT_NAME) <= 30
+    // Gibberish name: 4+ consecutive consonants OR mixed digits/letters with no dictionary words
+    and (
+        TENANT_NAME matches regex "[bcdfghjklmnpqrstvwxyzBCDFGHJKLMNPQRSTVWXYZ]{4,}"
+        or (TENANT_NAME matches regex "^[a-zA-Z0-9]+$" 
+            and TENANT_NAME matches regex "[a-zA-Z].*[0-9]|[0-9].*[a-zA-Z]"
+            and not(tolower(TENANT_NAME) has_any ("tech", "soft", "corp", "data", "info", "web", 
+                    "net", "cloud", "dev", "lab", "test", "demo", "group")))
+    )
+    // Behavioral fraud signals — at least 2 of:
+    and (
+        (TOTAL_ACTIVATED_USERS <= 2 and TENANT_TOTAL_DISK_USED_GB > 100)         // Low usage, high storage
+        or (SESSION_COUNT <= 5 and TENANT_TOTAL_DISK_USED_GB > 500)               // Near-zero sessions, very high storage  
+        or (TOTAL_ACTIVATED_USERS == 0 and TENANT_TOTAL_DISK_USED_GB > 50)        // Zero users with storage
+    )
+| extend 
+    NameLength = strlen(TENANT_NAME),
+    VowelCount = countof(tolower(TENANT_NAME), "a") + countof(tolower(TENANT_NAME), "e") + 
+                 countof(tolower(TENANT_NAME), "i") + countof(tolower(TENANT_NAME), "o") + 
+                 countof(tolower(TENANT_NAME), "u"),
+    LetterCount = countof(tolower(TENANT_NAME), @"[a-z]", "regex")
+| extend VowelRatio = iff(LetterCount > 0, round(todouble(VowelCount) / todouble(LetterCount), 2), 0.0)
+| project 
+    SITE_SUBSCRIPTION_ID,
+    OMS_TENANT_ID,
+    TENANT_NAME,
+    CURRENT_DEFAULT_DOMAIN,
+    NameLength,
+    VowelRatio,
+    TENANT_LEVEL,
+    TENANT_TYPE,
+    COUNTRY_CODE,
+    TENANT_CREATED_DATE,
+    TENANT_TOTAL_DISK_USED_GB,
+    STORAGE_LIMIT_GB,
+    TOTAL_ACTIVATED_USERS,
+    SESSION_COUNT,
+    TOTAL_USERS,
+    LICENSES_ENABLED,
+    LICENSES_ACQUIRED,
+    HAS_EVER_PAID,
+    D2KINSTANCE,
+    CITY
+| order by TENANT_TOTAL_DISK_USED_GB desc
+
+// ============================================================================
+// QUERY 4: Impact summary — Total tenants and storage by gibberish category
+// Use this to estimate your remediation opportunity
+// ============================================================================
+
+let consonant_heavy = TENANT_INFO
+| where HAS_ONLY_ONMICROSOFT_DOMAIN == 1
+    and toupper(coalesce(HAS_EVER_PAID, "FALSE")) == "FALSE"
+    and toupper(coalesce(ISS500, "FALSE")) == "FALSE"
+    and toupper(coalesce(ISS2200, "FALSE")) == "FALSE"
+    and strlen(TENANT_NAME) >= 4
+    and TENANT_NAME matches regex "[bcdfghjklmnpqrstvwxyzBCDFGHJKLMNPQRSTVWXYZ]{4,}"
+    and not(TENANT_NAME matches regex "^[A-Z]{2,4}$")
+| extend VowelCount = countof(tolower(TENANT_NAME), "a") + countof(tolower(TENANT_NAME), "e") + 
+                       countof(tolower(TENANT_NAME), "i") + countof(tolower(TENANT_NAME), "o") + 
+                       countof(tolower(TENANT_NAME), "u"),
+         LetterCount = countof(tolower(TENANT_NAME), @"[a-z]", "regex")
+| extend VowelRatio = iff(LetterCount > 0, todouble(VowelCount) / todouble(LetterCount), 0.0)
+| where VowelRatio < 0.20;
+let digit_mixed = TENANT_INFO
+| where HAS_ONLY_ONMICROSOFT_DOMAIN == 1
+    and toupper(coalesce(HAS_EVER_PAID, "FALSE")) == "FALSE"
+    and toupper(coalesce(ISS500, "FALSE")) == "FALSE"
+    and toupper(coalesce(ISS2200, "FALSE")) == "FALSE"
+    and strlen(TENANT_NAME) >= 5 and strlen(TENANT_NAME) <= 15
+    and TENANT_NAME matches regex "^[a-zA-Z0-9]+$"
+    and TENANT_NAME matches regex "[a-zA-Z].*[0-9]|[0-9].*[a-zA-Z]"
+    and not(tolower(TENANT_NAME) has_any ("tech", "soft", "corp", "data", "info", "web", 
+            "net", "cloud", "dev", "lab", "test", "demo", "group"))
+| extend DigitCount = countof(TENANT_NAME, @"[0-9]", "regex")
+| extend DigitRatio = todouble(DigitCount) / todouble(strlen(TENANT_NAME))
+| where DigitRatio > 0.25;
+let behavioral_combined = TENANT_INFO
+| where HAS_ONLY_ONMICROSOFT_DOMAIN == 1
+    and toupper(coalesce(HAS_EVER_PAID, "FALSE")) == "FALSE"
+    and toupper(coalesce(ISS500, "FALSE")) == "FALSE"
+    and toupper(coalesce(ISS2200, "FALSE")) == "FALSE"
+    and strlen(TENANT_NAME) >= 4
+    and (TENANT_NAME matches regex "[bcdfghjklmnpqrstvwxyzBCDFGHJKLMNPQRSTVWXYZ]{4,}"
+         or (TENANT_NAME matches regex "^[a-zA-Z0-9]+$" 
+             and TENANT_NAME matches regex "[a-zA-Z].*[0-9]|[0-9].*[a-zA-Z]"))
+    and (TOTAL_ACTIVATED_USERS <= 2 and TENANT_TOTAL_DISK_USED_GB > 100);
+union
+    (consonant_heavy | summarize Tenants=count(), StorageTB=round(sum(TENANT_TOTAL_DISK_USED_GB)/1024.0,1), 
+     AvgStorageGB=round(avg(TENANT_TOTAL_DISK_USED_GB),0), Countries=dcount(COUNTRY_CODE) | extend Category="Consonant-Heavy Names"),
+    (digit_mixed | summarize Tenants=count(), StorageTB=round(sum(TENANT_TOTAL_DISK_USED_GB)/1024.0,1),
+     AvgStorageGB=round(avg(TENANT_TOTAL_DISK_USED_GB),0), Countries=dcount(COUNTRY_CODE) | extend Category="Digit-Mixed Random Names"),
+    (behavioral_combined | summarize Tenants=count(), StorageTB=round(sum(TENANT_TOTAL_DISK_USED_GB)/1024.0,1),
+     AvgStorageGB=round(avg(TENANT_TOTAL_DISK_USED_GB),0), Countries=dcount(COUNTRY_CODE) | extend Category="Gibberish + Behavioral (High Confidence)")
+| project Category, Tenants, StorageTB, AvgStorageGB, Countries
+
+// ============================================================================
+// QUERY 5: Cross-reference with existing FAB entries
+// Find gibberish-name tenants NOT already in the fraud database
+// ============================================================================
+
+TENANT_INFO
+| where HAS_ONLY_ONMICROSOFT_DOMAIN == 1
+    and toupper(coalesce(HAS_EVER_PAID, "FALSE")) == "FALSE"
+    and toupper(coalesce(ISS500, "FALSE")) == "FALSE"
+    and toupper(coalesce(ISS2200, "FALSE")) == "FALSE"
+    and strlen(TENANT_NAME) >= 4
+    and (
+        TENANT_NAME matches regex "[bcdfghjklmnpqrstvwxyzBCDFGHJKLMNPQRSTVWXYZ]{4,}"
+        or (TENANT_NAME matches regex "^[a-zA-Z0-9]+$" 
+            and TENANT_NAME matches regex "[a-zA-Z].*[0-9]|[0-9].*[a-zA-Z]"
+            and not(tolower(TENANT_NAME) has_any ("tech", "soft", "corp", "data", "info", "web",
+                    "net", "cloud", "dev", "lab", "test", "demo", "group")))
+    )
+    and (TOTAL_ACTIVATED_USERS <= 2 and TENANT_TOTAL_DISK_USED_GB > 100)
+    and isempty(STATUS)  // Not already in FAB
+| project 
+    SITE_SUBSCRIPTION_ID,
+    TENANT_NAME,
+    CURRENT_DEFAULT_DOMAIN,
+    TENANT_LEVEL,
+    COUNTRY_CODE,
+    TENANT_TOTAL_DISK_USED_GB,
+    TOTAL_ACTIVATED_USERS,
+    SESSION_COUNT,
+    TENANT_CREATED_DATE,
+    D2KINSTANCE
+| order by TENANT_TOTAL_DISK_USED_GB desc
+
+// ============================================================================
+// QUERY 6: Sample examination — Top 50 gibberish names for manual review
+// Use this to validate detection quality before bulk remediation
+// ============================================================================
+
+TENANT_INFO
+| where HAS_ONLY_ONMICROSOFT_DOMAIN == 1
+    and toupper(coalesce(HAS_EVER_PAID, "FALSE")) == "FALSE"
+    and toupper(coalesce(ISS500, "FALSE")) == "FALSE"
+    and toupper(coalesce(ISS2200, "FALSE")) == "FALSE"
+    and strlen(TENANT_NAME) >= 4
+    and strlen(TENANT_NAME) <= 30
+    and (
+        TENANT_NAME matches regex "[bcdfghjklmnpqrstvwxyzBCDFGHJKLMNPQRSTVWXYZ]{5,}"
+        or (TENANT_NAME matches regex "^[a-zA-Z0-9]+$" 
+            and TENANT_NAME matches regex "[a-zA-Z].*[0-9]|[0-9].*[a-zA-Z]"
+            and strlen(TENANT_NAME) <= 10)
+    )
+    and TENANT_TOTAL_DISK_USED_GB > 50
+| extend 
+    VowelCount = countof(tolower(TENANT_NAME), "a") + countof(tolower(TENANT_NAME), "e") + 
+                 countof(tolower(TENANT_NAME), "i") + countof(tolower(TENANT_NAME), "o") + 
+                 countof(tolower(TENANT_NAME), "u"),
+    LetterCount = countof(tolower(TENANT_NAME), @"[a-z]", "regex")
+| extend VowelRatio = iff(LetterCount > 0, round(todouble(VowelCount) / todouble(LetterCount), 2), 0.0)
+| project 
+    SITE_SUBSCRIPTION_ID,
+    TENANT_NAME,
+    CURRENT_DEFAULT_DOMAIN,
+    VowelRatio,
+    TENANT_LEVEL,
+    TENANT_TYPE,
+    COUNTRY_CODE,
+    TENANT_CREATED_DATE,
+    TENANT_TOTAL_DISK_USED_GB,
+    TOTAL_ACTIVATED_USERS,
+    SESSION_COUNT,
+    LICENSES_ENABLED,
+    D2KINSTANCE,
+    CITY
+| order by TENANT_TOTAL_DISK_USED_GB desc
+| take 50

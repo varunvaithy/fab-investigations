@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Investigations — FAB Portal</title>
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/manifest.js"></script>
+<style>
+  .page-header { padding: 32px 0 0; }
+  .page-header h1 {
+    font-size: 28px; font-weight: 800; letter-spacing: -1px;
+    background: linear-gradient(135deg, #e2e8f0, #a5b4fc);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  }
+  .page-header p { color: var(--text-muted); font-size: 14px; margin-top: 4px; }
+
+  .results-info { font-size: 13px; color: var(--text-muted); margin-bottom: 16px; }
+  .results-info strong { color: var(--text); }
+
+  .sort-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 20px; }
+  .sort-bar label { font-size: 12px; color: var(--text-muted); }
+  .sort-bar select {
+    background: var(--bg-surface); border: 1px solid var(--border); color: var(--text);
+    padding: 6px 12px; border-radius: var(--radius-xs); font-size: 12px; font-family: var(--font);
+    cursor: pointer; outline: none;
+  }
+  .sort-bar select:focus { border-color: var(--accent); }
+
+  .inv-list { display: flex; flex-direction: column; gap: 12px; }
+
+  .inv-row {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 20px 24px; transition: all var(--transition); cursor: pointer;
+    text-decoration: none; color: inherit; display: grid;
+    grid-template-columns: 1fr auto; gap: 16px; align-items: start;
+    position: relative; overflow: hidden;
+  }
+  .inv-row:hover { border-color: var(--border-hover); background: var(--bg-card-hover); transform: translateX(4px); box-shadow: var(--shadow-sm); color: inherit; }
+  .inv-row .left-accent { position: absolute; top: 0; bottom: 0; left: 0; width: 4px; }
+  .inv-row-main { min-width: 0; }
+  .inv-row-head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; flex-wrap: wrap; }
+  .inv-row-title { font-size: 15px; font-weight: 600; letter-spacing: -0.2px; }
+  .inv-row-id { font-size: 11px; color: var(--text-dim); font-family: var(--font-mono); background: rgba(255,255,255,0.04); padding: 2px 8px; border-radius: 4px; }
+  .inv-row-summary { font-size: 13px; color: var(--text-muted); line-height: 1.55; margin-bottom: 10px; }
+  .inv-row-tags { display: flex; gap: 6px; flex-wrap: wrap; }
+  .inv-row-tags .tag { font-size: 10px; padding: 2px 8px; border-radius: 4px; background: rgba(255,255,255,0.04); color: var(--text-dim); }
+  .inv-row-right { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; min-width: 120px; }
+  .inv-row-date { font-size: 11px; color: var(--text-dim); }
+  .inv-row-stats { font-size: 12px; color: var(--text-muted); text-align: right; }
+  .inv-row-stats strong { color: var(--text); }
+
+  .no-results { text-align: center; padding: 80px 32px; color: var(--text-muted); }
+  .no-results p { font-size: 15px; }
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="topnav-brand"><div class="logo">F</div>FAB Portal</div>
+  <div class="topnav-links">
+    <a href="../portal.html">Home</a>
+    <a href="index.html" class="active">Investigations</a>
+    <a href="../data-explorer/index.html">Data Explorer</a>
+    <a href="../queries/index.html">Query Library</a>
+    <a href="../biweekly-report/dashboard/index.html">Dashboard</a>
+  </div>
+</nav>
+
+<div class="container">
+  <div class="page-header">
+    <h1>Investigations</h1>
+    <p>All fraud & abuse investigations — search, filter, and drill into any report.</p>
+  </div>
+
+  <!-- Filter bar -->
+  <div class="filter-bar mt-32">
+    <input type="text" class="search-input" id="search" placeholder="Search investigations... (title, tags, summary)">
+    <div class="filter-chips" id="categoryChips"></div>
+  </div>
+
+  <!-- Sort + results count -->
+  <div class="flex-between mb-16">
+    <div class="results-info" id="resultsInfo"></div>
+    <div class="sort-bar">
+      <label>Sort by:</label>
+      <select id="sortSelect">
+        <option value="date-desc">Date (newest)</option>
+        <option value="date-asc">Date (oldest)</option>
+        <option value="severity">Severity</option>
+        <option value="tenants">Tenants (most)</option>
+        <option value="title">Title (A-Z)</option>
+      </select>
+    </div>
+  </div>
+
+  <!-- Severity filter chips -->
+  <div class="filter-chips mb-16" id="severityChips"></div>
+
+  <!-- Investigation list -->
+  <div class="inv-list" id="invList"></div>
+
+  <div class="no-results" id="noResults" style="display:none;">
+    <p>No investigations match your filters.</p>
+  </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  const searchInput = document.getElementById('search');
+  const sortSelect = document.getElementById('sortSelect');
+  const invList = document.getElementById('invList');
+  const resultsInfo = document.getElementById('resultsInfo');
+  const noResults = document.getElementById('noResults');
+
+  let activeCategory = null;
+  let activeSeverity = null;
+
+  // Parse URL params
+  const params = new URLSearchParams(window.location.search);
+  if (params.get('category')) activeCategory = params.get('category');
+  if (params.get('severity')) activeSeverity = params.get('severity');
+  if (params.get('q')) searchInput.value = params.get('q');
+
+  // Render category chips
+  const cats = {};
+  INVESTIGATIONS.forEach(i => { cats[i.category] = (cats[i.category] || 0) + 1; });
+  const chipContainer = document.getElementById('categoryChips');
+  chipContainer.innerHTML = `<button class="chip ${!activeCategory?'active':''}" data-cat="">All</button>` +
+    Object.entries(cats).sort((a,b)=>b[1]-a[1]).map(([cat, count]) => {
+      const meta = CATEGORIES[cat] || { label: cat, icon: '📋' };
+      return `<button class="chip ${activeCategory===cat?'active':''}" data-cat="${cat}">${meta.icon} ${meta.label} (${count})</button>`;
+    }).join('');
+
+  chipContainer.addEventListener('click', e => {
+    if (!e.target.classList.contains('chip')) return;
+    activeCategory = e.target.dataset.cat || null;
+    chipContainer.querySelectorAll('.chip').forEach(c => c.classList.remove('active'));
+    e.target.classList.add('active');
+    render();
+  });
+
+  // Severity chips
+  const sevContainer = document.getElementById('severityChips');
+  sevContainer.innerHTML = `<button class="chip ${!activeSeverity?'active':''}" data-sev="">All Severities</button>` +
+    ['critical','high','medium','low'].map(sev => {
+      const meta = SEVERITY_META[sev];
+      const count = INVESTIGATIONS.filter(i => i.severity === sev).length;
+      return `<button class="chip ${activeSeverity===sev?'active':''}" data-sev="${sev}" style="border-color:${activeSeverity===sev?meta.color:''}">
+        <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${meta.color};margin-right:4px"></span>
+        ${meta.label} (${count})
+      </button>`;
+    }).join('');
+
+  sevContainer.addEventListener('click', e => {
+    const chip = e.target.closest('.chip');
+    if (!chip) return;
+    activeSeverity = chip.dataset.sev || null;
+    sevContainer.querySelectorAll('.chip').forEach(c => c.classList.remove('active'));
+    chip.classList.add('active');
+    render();
+  });
+
+  searchInput.addEventListener('input', render);
+  sortSelect.addEventListener('change', render);
+
+  function relativeDate(dateStr) {
+    const d = new Date(dateStr);
+    const now = new Date();
+    const days = Math.floor((now - d) / 86400000);
+    if (days === 0) return 'Today';
+    if (days === 1) return 'Yesterday';
+    if (days < 7) return days + ' days ago';
+    if (days < 30) return Math.floor(days/7) + ' weeks ago';
+    if (days < 365) return Math.floor(days/30) + ' months ago';
+    return Math.floor(days/365) + ' years ago';
+  }
+
+  const sevOrder = { critical: 0, high: 1, medium: 2, low: 3 };
+
+  function render() {
+    const q = searchInput.value.toLowerCase().trim();
+    let filtered = INVESTIGATIONS.filter(inv => {
+      if (activeCategory && inv.category !== activeCategory) return false;
+      if (activeSeverity && inv.severity !== activeSeverity) return false;
+      if (q) {
+        const text = [inv.title, inv.id, inv.summary, inv.category, ...inv.tags].join(' ').toLowerCase();
+        return text.includes(q);
+      }
+      return true;
+    });
+
+    // Sort
+    const sort = sortSelect.value;
+    filtered.sort((a, b) => {
+      if (sort === 'date-desc') return b.date.localeCompare(a.date);
+      if (sort === 'date-asc') return a.date.localeCompare(b.date);
+      if (sort === 'severity') return (sevOrder[a.severity]||9) - (sevOrder[b.severity]||9);
+      if (sort === 'tenants') return (b.tenants||0) - (a.tenants||0);
+      if (sort === 'title') return a.title.localeCompare(b.title);
+      return 0;
+    });
+
+    resultsInfo.innerHTML = `Showing <strong>${filtered.length}</strong> of ${INVESTIGATIONS.length} investigations`;
+    noResults.style.display = filtered.length === 0 ? 'block' : 'none';
+
+    invList.innerHTML = filtered.map(inv => {
+      const cat = CATEGORIES[inv.category] || { label: inv.category, color: '#6366f1', icon: '📋' };
+      const sev = SEVERITY_META[inv.severity] || { label: 'Unknown', color: '#64748b', bg: 'rgba(100,116,139,0.1)' };
+      const st = STATUS_META[inv.status] || { label: inv.status, color: '#64748b' };
+
+      return `<a href="viewer.html?id=${inv.id}" class="inv-row">
+        <div class="left-accent" style="background:${cat.color}"></div>
+        <div class="inv-row-main">
+          <div class="inv-row-head">
+            <span class="inv-row-title">${inv.title}</span>
+            <span class="inv-row-id">${inv.id.toUpperCase()}</span>
+            <span class="badge" style="background:${sev.bg};color:${sev.color}">${sev.label}</span>
+            <span class="badge badge-default">${cat.icon} ${cat.label}</span>
+            <span class="badge" style="background:rgba(255,255,255,0.04);color:${st.color}">● ${st.label}</span>
+          </div>
+          <div class="inv-row-summary">${inv.summary}</div>
+          <div class="inv-row-tags">
+            ${inv.tags.map(t => `<span class="tag">${t}</span>`).join('')}
+          </div>
+        </div>
+        <div class="inv-row-right">
+          <div class="inv-row-date" style="font-size:12px;font-weight:600;color:var(--text)">${inv.date}</div>
+          <div class="inv-row-date">${relativeDate(inv.date)}</div>
+          <div class="inv-row-stats"><strong>${inv.tenants?.toLocaleString() || '—'}</strong> tenants</div>
+          <div class="inv-row-stats">${inv.storage}</div>
+        </div>
+      </a>`;
+    }).join('');
+  }
+
+  render();
+});
+</script>
+</body>
+</html>
